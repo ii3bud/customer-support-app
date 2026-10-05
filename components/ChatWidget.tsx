@@ -1,146 +1,325 @@
 'use client';
 
-import React, { useState } from 'react';
-import { MessageSquare, X, Send, Bot, User, Mic } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { supabase } from '@/lib/supabase';
+import LoginModal from './LoginModal';
 
 interface Message {
-  id: number;
+  sender: 'user' | 'agent';
   text: string;
-  sender: 'bot' | 'user';
-  time: string;
+  actionUrl?: string;
+  actionText?: string;
 }
 
 export default function ChatWidget() {
   const [isOpen, setIsOpen] = useState(false);
-  const [inputMessage, setInputMessage] = useState('');
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [user, setUser] = useState<any>(null);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
-      id: 1,
-      text: 'أهلاً بك! أنا وكيل الدعم الذكي. كيف يمكنني مساعدتك اليوم؟',
-      sender: 'bot',
-      time: '10:00 ص',
+      sender: 'agent',
+      text: 'أهلاً بك في البوابة الطبية الذكية! يمكنك الاستفسار عن المواعيد، الوصفات، التقارير الطبية، أو نتائج التحاليل والأشعة.',
     },
   ]);
 
-  const handleSendMessage = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputMessage.trim()) return;
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user) setUser(data.user);
+    });
 
-    const userMsg: Message = {
-      id: Date.now(),
-      text: inputMessage,
-      sender: 'user',
-      time: new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' }),
-    };
+    const { data: authListener } = supabase.auth.onAuthStateChange((_, session) => {
+      setUser(session?.user ?? null);
+    });
 
-    setMessages((prev) => [...prev, userMsg]);
-    setInputMessage('');
+    return () => authListener.subscription.unsubscribe();
+  }, []);
 
-    setTimeout(() => {
-      const botMsg: Message = {
-        id: Date.now() + 1,
-        text: 'تم استلام استفسارك! جاري العمل على معالجة الطلب وربط الـ AI قريباً.',
-        sender: 'bot',
-        time: new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' }),
-      };
-      setMessages((prev) => [...prev, botMsg]);
-    }, 1000);
+  const handleSend = async () => {
+    if (!input.trim() || loading) return;
+
+    const userQuery = input.trim();
+    setInput('');
+    setMessages((prev) => [...prev, { sender: 'user', text: userQuery }]);
+    setLoading(true);
+
+    try {
+      if (!user) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'agent',
+            text: 'لتصفح سجلك الطبي والاستفادة من الخدمات المخصصة، يرجى تسجيل الدخول أولاً.',
+          },
+        ]);
+        setIsLoginModalOpen(true);
+        setLoading(false);
+        return;
+      }
+
+      // 1. سيناريو المواعيد (استعلام / تعديل / إلغاء)
+      if (userQuery.includes('موعد') || userQuery.includes('حجز')) {
+        const { data: appts } = await supabase
+          .from('patient_appointments')
+          .select('*')
+          .eq('patient_id', user.id)
+          .eq('status', 'مؤكد');
+
+        if (appts && appts.length > 0) {
+          const appt = appts[0];
+          const dateFormatted = new Date(appt.appointment_date).toLocaleDateString('ar-SA');
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: `لديك موعد قادم مع ${appt.doctor_name} في [${appt.clinic_name}] بتاريخ ${dateFormatted}.`,
+              actionUrl: `/appointments/manage?id=${appt.id}`,
+              actionText: 'إلغاء أو تعديل الموعد',
+            },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: 'لا توجد لديك مواعيد قائمة حالياً. هل ترغب في حجز موعد جديد؟',
+              actionUrl: '/appointments/book',
+              actionText: 'حجز موعد جديد',
+            },
+          ]);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // 2. سيناريو الوصفات الطبية وتجديدها
+      if (userQuery.includes('وصفة') || userQuery.includes('دواء') || userQuery.includes('علاج') || userQuery.includes('تجديد')) {
+        const { data: prescriptions } = await supabase
+          .from('patient_prescriptions')
+          .select('*')
+          .eq('patient_id', user.id);
+
+        if (prescriptions && prescriptions.length > 0) {
+          const rxList = prescriptions.map((p) => `• ${p.medication_name} (${p.dosage}) - الحالة: ${p.status}`).join('\n');
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: `إليك الوصفات المسجلة في ملفك:\n${rxList}`,
+              actionUrl: `/prescriptions/renew?id=${prescriptions[0].id}`,
+              actionText: `تأكيد طلب إعادة صرف (${prescriptions[0].medication_name})`,
+            },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { sender: 'agent', text: 'لا توجد وصفات مسجلة في سجلك حالياً.' },
+          ]);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // 3. سيناريو التقارير والإجازات المرضية
+      if (userQuery.includes('تقرير') || userQuery.includes('إجازة') || userQuery.includes('اجازة')) {
+        const { data: reports } = await supabase
+          .from('patient_medical_reports')
+          .select('*')
+          .eq('patient_id', user.id);
+
+        if (reports && reports.length > 0) {
+          const listText = reports.map((r) => `• ${r.report_type} بتاريخ ${r.issue_date} (${r.doctor_name})`).join('\n');
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: `تم العثور على الوثائق التالية في ملفك الطبي:\n${listText}`,
+              actionUrl: '/reports/download',
+              actionText: 'تحميل التقارير والإجازات (PDF)',
+            },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { sender: 'agent', text: 'لا توجد تقارير أو إجازات مرضية مسجلة في ملفك.' },
+          ]);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // 4. سيناريو التحاليل والأشعة
+      if (userQuery.includes('تحليل') || userQuery.includes('أشعة') || userQuery.includes('اشعة') || userQuery.includes('فحص')) {
+        const { data: labs } = await supabase
+          .from('patient_lab_results')
+          .select('*')
+          .eq('patient_id', user.id);
+
+        if (labs && labs.length > 0) {
+          const labList = labs.map((l) => `• [${l.test_type}] ${l.test_name} (${l.result_date}): ${l.summary}`).join('\n');
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: `إليك نتائج الفحوصات والأشعة من ملفك الطبي:\n${labList}`,
+              actionUrl: '/lab-results/view',
+              actionText: 'عرض التقارير الطبية التفصيلية',
+            },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { sender: 'agent', text: 'لا توجد نتائج تحاليل أو أشعة جديدة مسجلة.' },
+          ]);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // 5. استعراض الملف الطبي الشامل
+      if (userQuery.includes('ملفي') || userQuery.includes('سجلي') || userQuery.includes('تأمين')) {
+        const { data: profile } = await supabase
+          .from('patient_profiles')
+          .select('*')
+          .eq('id', user.id)
+          .single();
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'agent',
+            text: `معلومات الملف الطبي:\n• الاسم: ${profile?.full_name || 'غير محدد'}\n• رقم الهوية: ${profile?.national_id || '-'}\n• شركة التأمين: ${profile?.insurance_provider || '-'}`,
+            actionUrl: '/profile',
+            actionText: 'استعراض السجل الطبي الكامل',
+          },
+        ]);
+        setLoading(false);
+        return;
+      }
+
+      // رد افتراضي للخدمات العامة
+      setMessages((prev) => [
+        ...prev,
+        {
+          sender: 'agent',
+          text: 'يمكنك الاستفسار عن: "مواعيدي"، "وصفاتي الطبية"، "إجازتي المرضية"، "نتائج التحاليل والأشعة"، أو "ملفي الطبي".',
+        },
+      ]);
+    } catch (err: any) {
+      console.error(err);
+      setMessages((prev) => [
+        ...prev,
+        { sender: 'agent', text: `حدث خطأ أثناء معالجة الطلب: ${err.message}` },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
   };
 
   return (
-    <div className="fixed bottom-6 left-6 z-50" dir="rtl">
-      {!isOpen && (
-        <button
-          onClick={() => setIsOpen(true)}
-          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-full shadow-2xl transition-all transform hover:scale-105"
-        >
-          <MessageSquare className="w-6 h-6" />
-          <span className="font-medium text-sm hidden sm:inline">تحدث مع المساعد الذكي</span>
-        </button>
-      )}
+    <>
+      <LoginModal
+        isOpen={isLoginModalOpen}
+        onClose={() => setIsLoginModalOpen(false)}
+        onSuccess={(loggedUser) => {
+          setUser(loggedUser);
+          setMessages((prev) => [
+            ...prev,
+            { sender: 'agent', text: 'تم تسجيل الدخول بنجاح! يمكنك الآن استعراض سجلك الطبي وطلب الخدمات المخصصة.' },
+          ]);
+        }}
+      />
 
-      {isOpen && (
-        <div className="w-[360px] sm:w-[400px] h-[520px] bg-white rounded-2xl shadow-2xl flex flex-col border border-gray-200 overflow-hidden transition-all">
-          <div className="bg-blue-600 text-white p-4 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-blue-500 rounded-lg">
-                <Bot className="w-6 h-6" />
-              </div>
+      <div className="fixed bottom-6 right-6 z-40 dir-rtl">
+        {!isOpen && (
+          <button
+            onClick={() => setIsOpen(true)}
+            className="bg-blue-600 hover:bg-blue-700 text-white rounded-full p-4 shadow-lg flex items-center gap-2 transition-all"
+          >
+            <span className="font-semibold">المساعد الذكي</span> 💬
+          </button>
+        )}
+
+        {isOpen && (
+          <div className="bg-white rounded-2xl shadow-2xl w-80 sm:w-96 border border-gray-200 flex flex-col h-[520px] overflow-hidden">
+            {/* Header */}
+            <div className="bg-blue-600 text-white p-4 flex justify-between items-center">
               <div>
-                <h3 className="font-bold text-sm">وكيل الدعم الذكي</h3>
-                <span className="text-xs text-blue-100 flex items-center gap-1">
-                  <span className="w-2 h-2 bg-green-400 rounded-full inline-block"></span> متاح الآن
-                </span>
+                <h3 className="font-bold text-base">البوابة الطبية الذكية</h3>
+                <p className="text-xs text-blue-100">
+                  {user ? `مرحباً بك (${user.email})` : 'زائر (غير مسجل)'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {user ? (
+                  <button onClick={handleLogout} className="text-xs bg-red-500 hover:bg-red-600 px-2 py-1 rounded">
+                    خروج
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setIsLoginModalOpen(true)}
+                    className="text-xs bg-emerald-500 hover:bg-emerald-600 px-2.5 py-1 rounded font-bold"
+                  >
+                    دخول
+                  </button>
+                )}
+                <button onClick={() => setIsOpen(false)} className="font-bold text-lg">✕</button>
               </div>
             </div>
-            <button
-              onClick={() => setIsOpen(false)}
-              className="p-1 hover:bg-blue-500 rounded-lg transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
 
-          <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-gray-50">
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex gap-2 ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                {msg.sender === 'bot' && (
-                  <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 shrink-0">
-                    <Bot className="w-4 h-4" />
-                  </div>
-                )}
-                <div
-                  className={`max-w-[75%] p-3 rounded-2xl text-sm ${
-                    msg.sender === 'user'
-                      ? 'bg-blue-600 text-white rounded-br-none'
-                      : 'bg-white text-gray-800 border border-gray-200 rounded-bl-none shadow-sm'
-                  }`}
-                >
-                  <p>{msg.text}</p>
-                  <span
-                    className={`text-[10px] block mt-1 ${
-                      msg.sender === 'user' ? 'text-blue-100 text-left' : 'text-gray-400 text-right'
+            {/* Messages */}
+            <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-gray-50">
+              {messages.map((msg, idx) => (
+                <div key={idx} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
+                  <div
+                    className={`p-3 rounded-2xl max-w-[85%] text-sm whitespace-pre-line ${
+                      msg.sender === 'user'
+                        ? 'bg-blue-600 text-white rounded-br-none'
+                        : 'bg-white text-gray-800 border border-gray-200 shadow-sm rounded-bl-none'
                     }`}
                   >
-                    {msg.time}
-                  </span>
-                </div>
-                {msg.sender === 'user' && (
-                  <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 shrink-0">
-                    <User className="w-4 h-4" />
+                    {msg.text}
                   </div>
-                )}
-              </div>
-            ))}
-          </div>
+                  {msg.actionUrl && (
+                    <a
+                      href={msg.actionUrl}
+                      className="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2 px-4 rounded-xl shadow transition-all"
+                    >
+                      🔗 {msg.actionText}
+                    </a>
+                  )}
+                </div>
+              ))}
+              {loading && <div className="text-xs text-gray-500 animate-pulse">جاري الاستعلام من قاعدة البيانات...</div>}
+            </div>
 
-          <form onSubmit={handleSendMessage} className="p-3 bg-white border-t border-gray-200 flex items-center gap-2">
-            <button
-              type="button"
-              className="p-2 text-gray-400 hover:text-blue-600 rounded-lg hover:bg-gray-100 transition-colors"
-              title="محادثة صوتية"
-            >
-              <Mic className="w-5 h-5" />
-            </button>
-            <input
-              type="text"
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              placeholder="اكتب استفسارك هنا..."
-              className="flex-1 text-sm border border-gray-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <button
-              type="submit"
-              className="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl transition-colors"
-            >
-              <Send className="w-4 h-4 transform rotate-180" />
-            </button>
-          </form>
-        </div>
-      )}
-    </div>
+            {/* Input */}
+            <div className="p-3 border-t border-gray-200 bg-white flex gap-2">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                placeholder="اكتب طلبك..."
+                className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-blue-600"
+              />
+              <button
+                onClick={handleSend}
+                disabled={loading}
+                className="bg-blue-600 text-white px-4 py-2 rounded-xl text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
+              >
+                إرسال
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
