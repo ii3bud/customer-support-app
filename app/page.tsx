@@ -1,3 +1,4 @@
+export const dynamic = 'force-dynamic';
 import ChatWidget from '../components/ChatWidget';
 
 export default function Home() {
