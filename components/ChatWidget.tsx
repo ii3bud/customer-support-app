@@ -12,6 +12,9 @@ interface Message {
 }
 
 export default function ChatWidget() {
+  // 1. حارس التحقق لمنع مشكلة Hydration Error بين السيرفر والمتصفح
+  const [isMounted, setIsMounted] = useState(false);
+
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -25,6 +28,8 @@ export default function ChatWidget() {
   ]);
 
   useEffect(() => {
+    setIsMounted(true); // تفعيل الجاهزية بعد رندر المتصفح الأول
+
     supabase.auth.getUser().then(({ data }) => {
       if (data.user) setUser(data.user);
     });
@@ -36,10 +41,16 @@ export default function ChatWidget() {
     return () => authListener.subscription.unsubscribe();
   }, []);
 
+  // عدم رندر أي مكونات حية حتى يكتمل تحميل المتصفح تفادياً لخطأ Hydration
+  if (!isMounted) {
+    return null;
+  }
+
   const handleSend = async () => {
     if (!input.trim() || loading) return;
 
     const userQuery = input.trim();
+    const cleanQuery = userQuery.toLowerCase(); // تنظيف النص للمطابقة
     setInput('');
     setMessages((prev) => [...prev, { sender: 'user', text: userQuery }]);
     setLoading(true);
@@ -58,8 +69,13 @@ export default function ChatWidget() {
         return;
       }
 
-      // 1. سيناريو المواعيد (استعلام / تعديل / إلغاء)
-      if (userQuery.includes('موعد') || userQuery.includes('حجز')) {
+      // 1. سيناريو المواعيد (استعلام / تعديل / إلغاء / مواعيدي)
+      if (
+        cleanQuery.includes('موعد') ||
+        cleanQuery.includes('مواعيد') ||
+        cleanQuery.includes('مواعيدي') ||
+        cleanQuery.includes('حجز')
+      ) {
         const { data: appts } = await supabase
           .from('patient_appointments')
           .select('*')
@@ -94,14 +110,23 @@ export default function ChatWidget() {
       }
 
       // 2. سيناريو الوصفات الطبية وتجديدها
-      if (userQuery.includes('وصفة') || userQuery.includes('دواء') || userQuery.includes('علاج') || userQuery.includes('تجديد')) {
+      if (
+        cleanQuery.includes('وصفة') ||
+        cleanQuery.includes('وصفات') ||
+        cleanQuery.includes('وصفاتي') ||
+        cleanQuery.includes('دواء') ||
+        cleanQuery.includes('علاج') ||
+        cleanQuery.includes('تجديد')
+      ) {
         const { data: prescriptions } = await supabase
           .from('patient_prescriptions')
           .select('*')
           .eq('patient_id', user.id);
 
         if (prescriptions && prescriptions.length > 0) {
-          const rxList = prescriptions.map((p) => `• ${p.medication_name} (${p.dosage}) - الحالة: ${p.status}`).join('\n');
+          const rxList = prescriptions
+            .map((p) => `• ${p.medication_name} (${p.dosage}) - الحالة: ${p.status}`)
+            .join('\n');
           setMessages((prev) => [
             ...prev,
             {
@@ -122,14 +147,22 @@ export default function ChatWidget() {
       }
 
       // 3. سيناريو التقارير والإجازات المرضية
-      if (userQuery.includes('تقرير') || userQuery.includes('إجازة') || userQuery.includes('اجازة')) {
+      if (
+        cleanQuery.includes('تقرير') ||
+        cleanQuery.includes('تقارير') ||
+        cleanQuery.includes('إجازة') ||
+        cleanQuery.includes('اجازة') ||
+        cleanQuery.includes('إجازاتي')
+      ) {
         const { data: reports } = await supabase
           .from('patient_medical_reports')
           .select('*')
           .eq('patient_id', user.id);
 
         if (reports && reports.length > 0) {
-          const listText = reports.map((r) => `• ${r.report_type} بتاريخ ${r.issue_date} (${r.doctor_name})`).join('\n');
+          const listText = reports
+            .map((r) => `• ${r.report_type} بتاريخ ${r.issue_date} (${r.doctor_name})`)
+            .join('\n');
           setMessages((prev) => [
             ...prev,
             {
@@ -150,14 +183,23 @@ export default function ChatWidget() {
       }
 
       // 4. سيناريو التحاليل والأشعة
-      if (userQuery.includes('تحليل') || userQuery.includes('أشعة') || userQuery.includes('اشعة') || userQuery.includes('فحص')) {
+      if (
+        cleanQuery.includes('تحليل') ||
+        cleanQuery.includes('تحاليل') ||
+        cleanQuery.includes('أشعة') ||
+        cleanQuery.includes('اشعة') ||
+        cleanQuery.includes('فحص') ||
+        cleanQuery.includes('فحوصات')
+      ) {
         const { data: labs } = await supabase
           .from('patient_lab_results')
           .select('*')
           .eq('patient_id', user.id);
 
         if (labs && labs.length > 0) {
-          const labList = labs.map((l) => `• [${l.test_type}] ${l.test_name} (${l.result_date}): ${l.summary}`).join('\n');
+          const labList = labs
+            .map((l) => `• [${l.test_type}] ${l.test_name} (${l.result_date}): ${l.summary}`)
+            .join('\n');
           setMessages((prev) => [
             ...prev,
             {
@@ -178,7 +220,12 @@ export default function ChatWidget() {
       }
 
       // 5. استعراض الملف الطبي الشامل
-      if (userQuery.includes('ملفي') || userQuery.includes('سجلي') || userQuery.includes('تأمين')) {
+      if (
+        cleanQuery.includes('ملفي') ||
+        cleanQuery.includes('سجلي') ||
+        cleanQuery.includes('تأمين') ||
+        cleanQuery.includes('تأميني')
+      ) {
         const { data: profile } = await supabase
           .from('patient_profiles')
           .select('*')
@@ -189,7 +236,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: `معلومات الملف الطبي:\n• الاسم: ${profile?.full_name || 'غير محدد'}\n• رقم الهوية: ${profile?.national_id || '-'}\n• شركة التأمين: ${profile?.insurance_provider || '-'}`,
+            text: `معلومات الملف الطبي:\nالاسم: ${profile?.full_name || 'غير محدد'}\nرقم الهوية: ${profile?.national_id || '-'}\nشركة التأمين: ${profile?.insurance_provider || '-'}`,
             actionUrl: '/profile',
             actionText: 'استعراض السجل الطبي الكامل',
           },
