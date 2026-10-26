@@ -312,8 +312,16 @@ export default function ChatWidget() {
         return;
       }
 
-      // 1. حجز موعد جديد
-      if (cleanQuery.includes('حجز') || cleanQuery.includes('جديد')) {
+      if (
+        cleanQuery.includes('حجز') ||
+        cleanQuery.includes('موقع') ||
+        cleanQuery.includes('موعد جديد') ||
+        cleanQuery.includes('اضافه موعد') ||
+        cleanQuery.includes('إضافة موعد') ||
+        cleanQuery.includes('ابي احجز') ||
+        cleanQuery.includes('أبي أحجز') ||
+        cleanQuery.includes('جديد')
+      ) {
         const { data: doctorsList } = await supabase.from('doctors').select('*');
         const docOptions: ActionOption[] = (doctorsList || []).map((doc: any) => ({
           label: `🩺 ${doc.doctor_name} (${doc.clinic_name})`,
@@ -333,12 +341,13 @@ export default function ChatWidget() {
         return;
       }
 
-      // 2. المواعيد
       if (
         cleanQuery.includes('موعد') ||
         cleanQuery.includes('مواعيد') ||
         cleanQuery.includes('مواعيدي') ||
-        cleanQuery.includes('جدول')
+        cleanQuery.includes('جدول') ||
+        cleanQuery.includes('زيارة') ||
+        cleanQuery.includes('حجوزاتي')
       ) {
         const { data: appts } = await supabase
           .from('patient_appointments')
@@ -401,13 +410,16 @@ export default function ChatWidget() {
         return;
       }
 
-      // 3. الوصفات الطبية
       if (
         cleanQuery.includes('وصفة') ||
         cleanQuery.includes('وصفات') ||
         cleanQuery.includes('وصفاتي') ||
         cleanQuery.includes('دواء') ||
-        cleanQuery.includes('صرف')
+        cleanQuery.includes('أدوية') ||
+        cleanQuery.includes('علاج') ||
+        cleanQuery.includes('علاجي') ||
+        cleanQuery.includes('صرف') ||
+        cleanQuery.includes('تجديد')
       ) {
         const { data: prescriptions } = await supabase
           .from('patient_prescriptions')
@@ -451,15 +463,17 @@ export default function ChatWidget() {
         return;
       }
 
-      // 4. التقارير والإجازات المرضية (مطابقة دقيقة شاملة لكل الكلمات)
       if (
         cleanQuery.includes('تقرير') ||
-        cleanQuery.includes('التقارير') ||
+        cleanQuery.includes('تقارير') ||
+        cleanQuery.includes('تقاريري') ||
         cleanQuery.includes('إجازة') ||
         cleanQuery.includes('اجازة') ||
-        cleanQuery.includes('إجازتي') ||
+        cleanQuery.includes('إجازاتي') ||
         cleanQuery.includes('إجازتي المرضية') ||
-        cleanQuery.includes('المرضية')
+        cleanQuery.includes('مرضية') ||
+        cleanQuery.includes('المرضية') ||
+        cleanQuery.includes('شهادة')
       ) {
         const { data: reports } = await supabase
           .from('patient_medical_reports')
@@ -489,14 +503,18 @@ export default function ChatWidget() {
         return;
       }
 
-      // 5. التحاليل والأشعة (مطابقة دقيقة شاملة لكل الكلمات)
       if (
         cleanQuery.includes('تحليل') ||
-        cleanQuery.includes('التحاليل') ||
+        cleanQuery.includes('تحاليل') ||
+        cleanQuery.includes('تحاليلى') ||
+        cleanQuery.includes('تحاليري') ||
         cleanQuery.includes('نتائج التحاليل') ||
         cleanQuery.includes('أشعة') ||
         cleanQuery.includes('اشعة') ||
-        cleanQuery.includes('فحص')
+        cleanQuery.includes('فحص') ||
+        cleanQuery.includes('فحوصات') ||
+        cleanQuery.includes('نتائج') ||
+        cleanQuery.includes('تخدير')
       ) {
         const { data: labs } = await supabase
           .from('patient_lab_results')
@@ -526,8 +544,13 @@ export default function ChatWidget() {
         return;
       }
 
-      // 6. الملف الطبي
-      if (cleanQuery.includes('ملفي') || cleanQuery.includes('سجلي') || cleanQuery.includes('تأمين')) {
+      if (
+        cleanQuery.includes('ملفي') ||
+        cleanQuery.includes('سجلي') ||
+        cleanQuery.includes('معلوماتي') ||
+        cleanQuery.includes('تأمين') ||
+        cleanQuery.includes('تأميني')
+      ) {
         const { data: profile } = await supabase
           .from('patient_profiles')
           .select('*')
@@ -549,7 +572,7 @@ export default function ChatWidget() {
         ...prev,
         {
           sender: 'agent',
-          text: 'يمكنك الاستفسار عن: "حجز موعد جديد"، "مواعيدي"، "وصفاتي الطبية"، "التقارير"، "إجازتي المرضية"، أو "نتائج التحاليل".',
+          text: 'عذراً، لم أفهم طلبك بدقة. يمكنك الاستفسار عن: "حجز موعد جديد"، "مواعيدي"، "وصفاتي الطبية"، "التقارير"، "إجازتي المرضية"، أو "نتائج التحاليل".',
         },
       ]);
     } catch (err: any) {
@@ -658,7 +681,7 @@ export default function ChatWidget() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="اكتب طلبك..."
+                placeholder="اكتب طلبك (مثال: حجز موعد)..."
                 className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-600"
               />
               <button
