@@ -6,7 +6,14 @@ import LoginModal from './LoginModal';
 
 interface ActionOption {
   label: string;
-  type: 'refill_single' | 'refill_all' | 'cancel_appt' | 'send_report' | 'send_labs';
+  type:
+    | 'refill_single'
+    | 'refill_all'
+    | 'cancel_appt'
+    | 'reschedule_init'
+    | 'reschedule_confirm'
+    | 'send_report'
+    | 'send_labs';
   payload?: any;
 }
 
@@ -26,7 +33,7 @@ export default function ChatWidget() {
   const [messages, setMessages] = useState<Message[]>([
     {
       sender: 'agent',
-      text: 'أهلاً بك في البوابة الطبية الذكية لمجموعة حبيب الطبية! يمكنك الاستفسار وتنفيذ الخدمات مباشرة مثل: "وصفاتي الطبية"، "مواعيدي"، "التقارير والإجازات"، أو "نتائج التحاليل".',
+      text: 'أهلاً بك في البوابة الطبية الذكية لمجموعة حبيب الطبية! يمكنك الاستفسار وتنفيذ الخدمات مباشرة مثل: "مواعيدي"، "وصفاتي الطبية"، "التقارير والإجازات"، أو "نتائج التحاليل".',
     },
   ]);
 
@@ -48,74 +55,200 @@ export default function ChatWidget() {
     return null;
   }
 
+  // دالة مساعدة لتوليد المواعيد المتاحة للطبيب خلال 30 يوماً القادمة مع استثناء الأيام المحجوزة في قاعدة البيانات
+  const getAvailableSlotsForDoctor = async (doctorName: string, currentApptDate: string) => {
+    // جلب كافة المواعيد المؤكدة لهذا الطبيب في قاعدة البيانات لمعرفة الأيام المحجوزة
+    const { data: bookedAppts } = await supabase
+      .from('patient_appointments')
+      .select('appointment_date')
+      .eq('doctor_name', doctorName)
+      .eq('status', 'مؤكد');
+
+    const bookedDates = new Set(
+      (bookedAppts || []).map((a) => new Date(a.appointment_date).toISOString().split('T')[0])
+    );
+
+    const availableSlots: { isoDate: string; displayDate: string }[] = [];
+    const today = new Date();
+
+    // البحث في الـ 30 يوماً القادمة عن أيام متاحة للطبيب (بغض النظر عن الجمعة)
+    for (let i = 2; i <= 30; i++) {
+      const candidate = new Date(today);
+      candidate.setDate(today.getDate() + i);
+
+      // استثناء يوم الجمعة (5) كإجازة أسبوعية افتراضية للعيادة
+      if (candidate.getDay() === 5) continue;
+
+      const dateStr = candidate.toISOString().split('T')[0];
+      const currentStr = new Date(currentApptDate).toISOString().split('T')[0];
+
+      // إذا كان اليوم غير محجوز في قاعدة البيانات وليس هو نفس يوم الموعد الحالي
+      if (!bookedDates.has(dateStr) && dateStr !== currentStr) {
+        // ضبط وقت افتراضي للعيادة (مثلاً 10:30 صباحاً أو 04:00 مساءً)
+        candidate.setHours(i % 2 === 0 ? 10 : 16, 30, 0, 0);
+
+        const formatted = candidate.toLocaleDateString('ar-SA', {
+          weekday: 'long',
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+        });
+        const timeStr = i % 2 === 0 ? '10:30 صباحاً' : '04:30 مساءً';
+
+        availableSlots.push({
+          isoDate: candidate.toISOString(),
+          displayDate: `${formatted} - الساعة ${timeStr}`,
+        });
+      }
+
+      // نكتفي بعرض أفضل 5 مواعيد متاحة خلال الشهر القادم لسهولة الاختيار
+      if (availableSlots.length >= 5) break;
+    }
+
+    return availableSlots;
+  };
+
   // دالة تنفيذ الإجراءات التفاعلية عند ضغط المستخدم على أحد الخيارات
   const handleOptionClick = async (option: ActionOption) => {
-    // إظهار اختيار المستخدم كرسالة في الشات
     setMessages((prev) => [...prev, { sender: 'user', text: option.label }]);
     setLoading(true);
 
-    // توليد رقم طلب مرجعي عشوائي مكون من 5 أرقام (مثال: 44857)
     const orderNumber = Math.floor(10000 + Math.random() * 90000);
 
-    setTimeout(async () => {
-      try {
-        if (option.type === 'refill_single') {
-          setMessages((prev) => [
-            ...prev,
-            {
-              sender: 'agent',
-              text: `تم اعتماد وإرسال طلب إعادة صرف الدواء (${option.payload.medication_name}) إلى الصيدلية بنجاح برقم طلب مرجعي (#${orderNumber}).\n\nيمكنكم استلام الأدوية مباشرة من صيدلية المستشفى، كما تم إشعاركم بتفاصيل الطلب عبر البريد الإلكتروني ورقم الجوال المسجل في ملفكم الطبي.`,
+    try {
+      // 1. بدء طلب تعديل الموعد: فحص جدول الطبيب في قاعدة البيانات خلال شهر قادم
+      if (option.type === 'reschedule_init') {
+        const appt = option.payload;
+        const availableSlots = await getAvailableSlotsForDoctor(
+          appt.doctor_name,
+          appt.appointment_date
+        );
+
+        if (availableSlots.length > 0) {
+          const slotOptions: ActionOption[] = availableSlots.map((slot) => ({
+            label: `📅 حجز: ${slot.displayDate}`,
+            type: 'reschedule_confirm',
+            payload: {
+              apptId: appt.id,
+              doctorName: appt.doctor_name,
+              clinicName: appt.clinic_name,
+              newIsoDate: slot.isoDate,
+              displayDate: slot.displayDate,
             },
-          ]);
-        } else if (option.type === 'refill_all') {
-          const names = option.payload.map((p: any) => p.medication_name).join('، ');
-          setMessages((prev) => [
-            ...prev,
-            {
-              sender: 'agent',
-              text: `تم اعتماد وإرسال طلب إعادة صرف كافة الوصفات الطبية (${names}) إلى الصيدلية بنجاح برقم طلب مرجعي (#${orderNumber}).\n\nيمكنكم استلامها مباشرة من صيدلية المستشفى، كما تم إشعاركم بتفاصيل الطلب عبر البريد الإلكتروني ورقم الجوال المسجل في ملفكم الطبي.`,
-            },
-          ]);
-        } else if (option.type === 'cancel_appt') {
-          // تحديث الحالة في قاعدة البيانات إذا رغب في الإلغاء الفعلي
-          await supabase
-            .from('patient_appointments')
-            .update({ status: 'ملغي' })
-            .eq('id', option.payload.id);
+          }));
 
           setMessages((prev) => [
             ...prev,
             {
               sender: 'agent',
-              text: `تم تأكيد إلغاء موعدكم مع ${option.payload.doctor_name} بنجاح برقم مرجعي (#${orderNumber}).\n\nتم إرسال إشعار تأكيد الإلغاء إلى بريدكم الإلكتروني ورقم الجوال المسجل.`,
+              text: `إليك المواعيد المتاحة في جدول ${appt.doctor_name} (${appt.clinic_name}) خلال الشهر القادم:\nيرجى اختيار الموعد الجديد لتأكيد التعديل في السجل:`,
+              options: slotOptions,
             },
           ]);
-        } else if (option.type === 'send_report') {
+        } else {
           setMessages((prev) => [
             ...prev,
             {
               sender: 'agent',
-              text: `تم إصدار نسخة مصدقة من التقارير والإجازات المرضية برقم طلب (#${orderNumber}).\n\nتم إرسال نسخة إلكترونية (PDF) إلى بريدكم الإلكتروني ورابط تحميل مباشر عبر رسالة نصية (SMS) إلى رقم الجوال المسجل.`,
-            },
-          ]);
-        } else if (option.type === 'send_labs') {
-          setMessages((prev) => [
-            ...prev,
-            {
-              sender: 'agent',
-              text: `تم تجهيز التقرير التفصيلي لنتائج الفحوصات والأشعة برقم مرجعي (#${orderNumber}).\n\nتم إرسال التقرير الطبي المعتمد إلى بريدكم الإلكتروني وإشعاركم عبر رقم الجوال المسجل.`,
+              text: `عذراً، جدول ${appt.doctor_name} محجوز بالكامل خلال الشهر القادم.`,
             },
           ]);
         }
-      } catch (err: any) {
+      }
+
+      // 2. تأكيد تعديل الموعد وتحديثه فعلياً في قاعدة بيانات Supabase
+      else if (option.type === 'reschedule_confirm') {
+        const { apptId, doctorName, clinicName, newIsoDate, displayDate } = option.payload;
+
+        const { error } = await supabase
+          .from('patient_appointments')
+          .update({
+            appointment_date: newIsoDate,
+            status: 'مؤكد',
+          })
+          .eq('id', apptId);
+
+        if (error) throw error;
+
         setMessages((prev) => [
           ...prev,
-          { sender: 'agent', text: `حدث خطأ أثناء تنفيذ العملية: ${err.message}` },
+          {
+            sender: 'agent',
+            text: `تم تعديل موعدكم وتحديثه في قاعدة البيانات بنجاح برقم مرجعي (#${orderNumber})!\n\n• الطبيب: ${doctorName}\n• العيادة: ${clinicName}\n• الموعد الجديد: ${displayDate}\n\nتم حجز هذا الموعد في جدول الطبيب وإرسال إشعار التأكيد إلى بريدكم الإلكتروني ورقم الجوال المسجل.`,
+          },
         ]);
-      } finally {
-        setLoading(false);
       }
-    }, 600);
+
+      // 3. إلغاء الموعد وتحديث حالته في قاعدة البيانات
+      else if (option.type === 'cancel_appt') {
+        const { error } = await supabase
+          .from('patient_appointments')
+          .update({ status: 'ملغي' })
+          .eq('id', option.payload.id);
+
+        if (error) throw error;
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'agent',
+            text: `تم تأكيد إلغاء موعدكم مع ${option.payload.doctor_name} وتحديث السجل في قاعدة البيانات بنجاح برقم مرجعي (#${orderNumber}).\n\nتم إرسال إشعار تأكيد الإلغاء إلى بريدكم الإلكتروني ورقم الجوال المسجل.`,
+          },
+        ]);
+      }
+
+      // 4. إعادة صرف دواء واحد
+      else if (option.type === 'refill_single') {
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'agent',
+            text: `تم اعتماد وإرسال طلب إعادة صرف الدواء (${option.payload.medication_name}) إلى الصيدلية بنجاح برقم طلب مرجعي (#${orderNumber}).\n\nيمكنكم استلام الأدوية مباشرة من صيدلية المستشفى، كما تم إشعاركم بتفاصيل الطلب عبر البريد الإلكتروني ورقم الجوال المسجل في ملفكم الطبي.`,
+          },
+        ]);
+      }
+
+      // 5. إعادة صرف كافة الأدوية
+      else if (option.type === 'refill_all') {
+        const names = option.payload.map((p: any) => p.medication_name).join('، ');
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'agent',
+            text: `تم اعتماد وإرسال طلب إعادة صرف كافة الوصفات الطبية (${names}) إلى الصيدلية بنجاح برقم طلب مرجعي (#${orderNumber}).\n\nيمكنكم استلامها مباشرة من صيدلية المستشفى، كما تم إشعاركم بتفاصيل الطلب عبر البريد الإلكتروني ورقم الجوال المسجل في ملفكم الطبي.`,
+          },
+        ]);
+      }
+
+      // 6. إرسال التقارير الطبية
+      else if (option.type === 'send_report') {
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'agent',
+            text: `تم إصدار نسخة مصدقة من التقارير والإجازات المرضية برقم طلب (#${orderNumber}).\n\nتم إرسال نسخة إلكترونية (PDF) إلى بريدكم الإلكتروني ورابط تحميل مباشر عبر رسالة نصية (SMS) إلى رقم الجوال المسجل.`,
+          },
+        ]);
+      }
+
+      // 7. إرسال نتائج المختبر والأشعة
+      else if (option.type === 'send_labs') {
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'agent',
+            text: `تم تجهيز التقرير التفصيلي لنتائج الفحوصات والأشعة برقم مرجعي (#${orderNumber}).\n\nتم إرسال التقرير الطبي المعتمد إلى بريدكم الإلكتروني وإشعاركم عبر رقم الجوال المسجل.`,
+          },
+        ]);
+      }
+    } catch (err: any) {
+      setMessages((prev) => [
+        ...prev,
+        { sender: 'agent', text: `حدث خطأ أثناء تنفيذ العملية في قاعدة البيانات: ${err.message}` },
+      ]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSend = async () => {
@@ -141,7 +274,70 @@ export default function ChatWidget() {
         return;
       }
 
-      // 1. سيناريو الوصفات الطبية وإعادة الصرف التفاعلي
+      // 1. سيناريو المواعيد (عرض المواعيد + خيار التعديل خلال شهر + خيار الإلغاء)
+      if (
+        cleanQuery.includes('موعد') ||
+        cleanQuery.includes('مواعيد') ||
+        cleanQuery.includes('مواعيدي') ||
+        cleanQuery.includes('حجز') ||
+        cleanQuery.includes('جدول')
+      ) {
+        const { data: appts } = await supabase
+          .from('patient_appointments')
+          .select('*')
+          .eq('patient_id', user.id)
+          .eq('status', 'مؤكد');
+
+        if (appts && appts.length > 0) {
+          const apptList = appts
+            .map((a, i) => {
+              const d = new Date(a.appointment_date).toLocaleDateString('ar-SA', {
+                weekday: 'long',
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+              });
+              return `${i + 1}. ${a.doctor_name} (${a.clinic_name}) - بتاريخ: ${d}`;
+            })
+            .join('\n');
+
+          // توليد خياري (تعديل الموعد) و (إلغاء الموعد) لكل موعد قائم
+          const options: ActionOption[] = [];
+          appts.forEach((a) => {
+            options.push({
+              label: `🗓️ تعديل موعد ${a.doctor_name}`,
+              type: 'reschedule_init',
+              payload: a,
+            });
+            options.push({
+              label: `❌ إلغاء موعد ${a.doctor_name}`,
+              type: 'cancel_appt',
+              payload: a,
+            });
+          });
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: `لديك المواعيد المؤكدة التالية في سجلك الطبي:\n${apptList}\n\nيرجى اختيار الإجراء المطلوب (تعديل الموعد لاستعراض الجدول المتاح خلال شهر، أو إلغاء الموعد):`,
+              options,
+            },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: 'لا توجد لديك مواعيد مؤكدة قائمة حالياً في السجل الطبي.',
+            },
+          ]);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // 2. سيناريو الوصفات الطبية وإعادة الصرف التفاعلي
       if (
         cleanQuery.includes('وصفة') ||
         cleanQuery.includes('وصفات') ||
@@ -162,14 +358,12 @@ export default function ChatWidget() {
             .map((p, i) => `${i + 1}. ${p.medication_name} (${p.dosage}) - الحالة: ${p.status}`)
             .join('\n');
 
-          // تكوين أزرار الاختيار لكل وصفة على حدة
           const options: ActionOption[] = prescriptions.map((p) => ({
             label: `🔄 إعادة صرف: ${p.medication_name}`,
             type: 'refill_single',
             payload: p,
           }));
 
-          // إذا كان هناك أكثر من وصفة، نضيف خيار "صرف كل الوصفات"
           if (prescriptions.length > 1) {
             options.push({
               label: '📦 إعادة صرف جميع الوصفات الطبية معاً',
@@ -190,54 +384,6 @@ export default function ChatWidget() {
           setMessages((prev) => [
             ...prev,
             { sender: 'agent', text: 'لا توجد وصفات طبية نشطة مسجلة في ملفك حالياً.' },
-          ]);
-        }
-        setLoading(false);
-        return;
-      }
-
-      // 2. سيناريو المواعيد (استعلام وإدارة مباشرة)
-      if (
-        cleanQuery.includes('موعد') ||
-        cleanQuery.includes('مواعيد') ||
-        cleanQuery.includes('مواعيدي') ||
-        cleanQuery.includes('حجز')
-      ) {
-        const { data: appts } = await supabase
-          .from('patient_appointments')
-          .select('*')
-          .eq('patient_id', user.id)
-          .eq('status', 'مؤكد');
-
-        if (appts && appts.length > 0) {
-          const apptList = appts
-            .map((a) => {
-              const d = new Date(a.appointment_date).toLocaleDateString('ar-SA');
-              return `• د. ${a.doctor_name} (${a.clinic_name}) - بتاريخ: ${d}`;
-            })
-            .join('\n');
-
-          const options: ActionOption[] = appts.map((a) => ({
-            label: `❌ إلغاء موعد د. ${a.doctor_name}`,
-            type: 'cancel_appt',
-            payload: a,
-          }));
-
-          setMessages((prev) => [
-            ...prev,
-            {
-              sender: 'agent',
-              text: `لديك المواعيد المؤكدة التالية:\n${apptList}\n\nيمكنك اختيار الإجراء المطلوب مباشرة:`,
-              options,
-            },
-          ]);
-        } else {
-          setMessages((prev) => [
-            ...prev,
-            {
-              sender: 'agent',
-              text: 'لا توجد لديك مواعيد مؤكدة قائمة حالياً في السجل.',
-            },
           ]);
         }
         setLoading(false);
@@ -360,7 +506,7 @@ export default function ChatWidget() {
         ...prev,
         {
           sender: 'agent',
-          text: 'يمكنك الاستفسار مباشرة عن: "وصفاتي الطبية"، "مواعيدي"، "إجازتي المرضية"، "نتائج التحاليل والأشعة"، أو "ملفي الطبي".',
+          text: 'يمكنك الاستفسار مباشرة عن: "مواعيدي"، "وصفاتي الطبية"، "إجازتي المرضية"، "نتائج التحاليل والأشعة"، أو "ملفي الطبي".',
         },
       ]);
     } catch (err: any) {
@@ -474,7 +620,7 @@ export default function ChatWidget() {
               ))}
               {loading && (
                 <div className="text-xs text-gray-500 animate-pulse">
-                  جاري معالجة الطلب مع قاعدة البيانات...
+                  جاري معالجة الطلب وتحديث قاعدة البيانات...
                 </div>
               )}
             </div>
@@ -486,7 +632,7 @@ export default function ChatWidget() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="اكتب طلبك هنا (مثال: وصفاتي)..."
+                placeholder="اكتب طلبك هنا (مثال: مواعيدي)..."
                 className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-600"
               />
               <button
