@@ -14,7 +14,8 @@ interface ActionOption {
     | 'reschedule_confirm'
     | 'book_select_doctor'
     | 'book_slot_confirm'
-    | 'send_report'
+    | 'send_single_report'
+    | 'send_all_reports'
     | 'send_labs';
   payload?: any;
 }
@@ -262,12 +263,21 @@ export default function ChatWidget() {
             text: `تم إرسال طلب إعادة صرف كافة الوصفات (${names}) للصيدلية برقم مرجعي (#${orderNumber}).`,
           },
         ]);
-      } else if (option.type === 'send_report') {
+      } else if (option.type === 'send_single_report') {
         setMessages((prev) => [
           ...prev,
           {
             sender: 'agent',
-            text: `تم إصدار نسخة مصدقة من التقارير والإجازات الطبية برقم مرجعي (#${orderNumber}) وتم إرسالها لبريدك الإلكتروني وجوالك المسجل.`,
+            text: `تم إصدار وإرسال نسخة مصدقة من (${option.payload.report_type} - بتاريخ ${option.payload.issue_date}) برقم مرجعي (#${orderNumber}) إلى بريدك الإلكتروني ورقم جوالك المسجل.`,
+          },
+        ]);
+      } else if (option.type === 'send_all_reports') {
+        const types = option.payload.map((r: any) => r.report_type).join(' و ');
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'agent',
+            text: `تم إصدار وإرسال كافة التقارير والإجازات (${types}) برقم مرجعي (#${orderNumber}) إلى بريدك الإلكتروني ورقم جوالك المسجل.`,
           },
         ]);
       } else if (option.type === 'send_labs') {
@@ -463,6 +473,7 @@ export default function ChatWidget() {
         return;
       }
 
+      // التقارير والإجازات (اختيار تقرير محدد أو الكل)
       if (
         cleanQuery.includes('تقرير') ||
         cleanQuery.includes('تقارير') ||
@@ -482,15 +493,31 @@ export default function ChatWidget() {
 
         if (reports && reports.length > 0) {
           const listText = reports
-            .map((r) => `• ${r.report_type} - بتاريخ ${r.issue_date} (${r.doctor_name})`)
+            .map((r, i) => `${i + 1}. ${r.report_type} - بتاريخ ${r.issue_date} (د. ${r.doctor_name})`)
             .join('\n');
+
+          // خيار لكل تقرير على حدة
+          const options: ActionOption[] = reports.map((r) => ({
+            label: `📩 إرسال: ${r.report_type} (${r.doctor_name})`,
+            type: 'send_single_report',
+            payload: r,
+          }));
+
+          // إذا كان هناك أكثر من تقرير، نضيف زر إرسال الكل معاً
+          if (reports.length > 1) {
+            options.push({
+              label: '📦 إرسال جميع التقارير والإجازات معاً (PDF)',
+              type: 'send_all_reports',
+              payload: reports,
+            });
+          }
 
           setMessages((prev) => [
             ...prev,
             {
               sender: 'agent',
-              text: `تم العثور على التقارير والإجازات الطبية في ملفك:\n${listText}`,
-              options: [{ label: '📩 إرسال نسخة مصدقة للإيميل والجوال (PDF)', type: 'send_report' }],
+              text: `تم العثور على التقارير والإجازات الطبية التالية في ملفك:\n${listText}\n\nيرجى اختيار التقرير المطلوب إرساله:`,
+              options,
             },
           ]);
         } else {
@@ -681,7 +708,7 @@ export default function ChatWidget() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="اكتب طلبك (مثال: حجز موعد)..."
+                placeholder="اكتب طلبك (مثال: التقارير)..."
                 className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-600"
               />
               <button
