@@ -25,14 +25,6 @@ interface Message {
   options?: ActionOption[];
 }
 
-// قائمة الأطباء المتاحة للحجز الجديد
-const DOCTORS_LIST = [
-  { name: 'د. خالد السليمان', clinic: 'عيادة الباطنية' },
-  { name: 'د. سارة العمري', clinic: 'عيادة الأطفال' },
-  { name: 'د. فهد الشمري', clinic: 'عيادة العظام' },
-  { name: 'د. منى الأحمد', clinic: 'عيادة الأسنان' },
-];
-
 export default function ChatWidget() {
   const [isMounted, setIsMounted] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
@@ -84,8 +76,7 @@ export default function ChatWidget() {
       const candidate = new Date(today);
       candidate.setDate(today.getDate() + i);
 
-      // استثناء يوم الجمعة (5) كإجازة أسبوعية
-      if (candidate.getDay() === 5) continue;
+      if (candidate.getDay() === 5) continue; // استثناء الجمعة
 
       const dateStr = candidate.toISOString().split('T')[0];
       const excludeStr = excludeDate ? new Date(excludeDate).toISOString().split('T')[0] : '';
@@ -120,26 +111,36 @@ export default function ChatWidget() {
     const orderNumber = Math.floor(10000 + Math.random() * 90000);
 
     try {
-      // 1. بدء حجز موعد جديد: عرض قائمة الأطباء والعيادات
+      // 1. جلب الأطباء من جدول قاعدة البيانات (doctors) ديناميكياً
       if (option.type === 'book_select_doctor') {
-        const docOptions: ActionOption[] = DOCTORS_LIST.map((doc) => ({
-          label: `🩺 ${doc.name} (${doc.clinic})`,
-          type: 'book_slot_confirm',
-          payload: doc,
-        }));
+        const { data: doctorsList, error: docError } = await supabase
+          .from('doctors')
+          .select('*');
 
-        setMessages((prev) => [
-          ...prev,
-          {
-            sender: 'agent',
-            text: 'اختر الطبيب أو التخصص المناسب لحجز موعد جديد:',
-            options: docOptions,
-          },
-        ]);
+        if (docError) throw docError;
+
+        if (doctorsList && doctorsList.length > 0) {
+          const docOptions: ActionOption[] = doctorsList.map((doc: any) => ({
+            label: `🩺 ${doc.doctor_name} (${doc.clinic_name})`,
+            type: 'book_slot_confirm',
+            payload: { name: doc.doctor_name, clinic: doc.clinic_name },
+          }));
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: 'اختر الطبيب أو التخصص المناسب لحجز موعد جديد (تم جلب البيانات من قاعدة البيانات مباشرة):',
+              options: docOptions,
+            },
+          ]);
+        } else {
+          setMessages((prev) => [...prev, { sender: 'agent', text: 'لا توجد عيادات أو أطباء متاحين حالياً في النظام.' }]);
+        }
       }
 
-      // 2. اختيار طبيب جديد وفحص المواعيد المتاحة لديه في جدول قاعدة البيانات
-      else if (option.type === 'book_slot_confirm' && !option.payload.apptId) {
+      // 2. اختيار الطبيب وفحص جدول المواعيد المتاحة
+      else if (option.type === 'book_slot_confirm' && !option.payload?.isNewBooking && !option.payload?.apptId) {
         const selectedDoc = option.payload;
         const availableSlots = await getAvailableSlotsForDoctor(selectedDoc.name);
 
@@ -160,20 +161,20 @@ export default function ChatWidget() {
             ...prev,
             {
               sender: 'agent',
-              text: `المواعيد المتاحة في جدول ${selectedDoc.name} (${selectedDoc.clinic}) خلال الشهر القادم:\nيرجى اختيار الموعد المناسب لإتمام الحجز في النظام:`,
+              text: `المواعيد المتاحة في جدول ${selectedDoc.name} (${selectedDoc.clinic}) خلال الشهر القادم:\nيرجى اختيار الموعد المناسب لإتمام الحجز:`,
               options: slotOptions,
             },
           ]);
         } else {
           setMessages((prev) => [
             ...prev,
-            { sender: 'agent', text: `عذراً، جدول ${selectedDoc.name} محجوز بالكامل خلال الفترة القادمة.` },
+            { sender: 'agent', text: `عذراً، جدول ${selectedDoc.name} محجوز بالكامل.` },
           ]);
         }
       }
 
-      // 3. إتمام وحفظ الحجز الجديد فعلياً في جدول قاعدة بيانات Supabase
-      else if (option.type === 'book_slot_confirm' && option.payload.isNewBooking) {
+      // 3. إتمام وحفظ الحجز الجديد في جدول patient_appointments
+      else if (option.type === 'book_slot_confirm' && option.payload?.isNewBooking) {
         const { doctorName, clinicName, newIsoDate, displayDate } = option.payload;
 
         const { error } = await supabase.from('patient_appointments').insert([
@@ -192,7 +193,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: `تم حجز موعدك الجديد وتسجيله في النظام بنجاح برقم مرجعي (#${orderNumber})!\n\n• الطبيب: ${doctorName}\n• العيادة: ${clinicName}\n• موعد الزيارة: ${displayDate}\n\nتم إرسال تفاصيل الموعد وإشعار التأكيد إلى بريدكم الإلكتروني ورقم الجوال المسجل.`,
+            text: `تم حجز موعدك الجديد وتسجيله في النظام بنجاح برقم مرجعي (#${orderNumber})!\n\n• الطبيب: ${doctorName}\n• العيادة: ${clinicName}\n• موعد الزيارة: ${displayDate}\n\nتم إرسال إشعار التأكيد لبريدك الإلكتروني وجوالك المسجل.`,
           },
         ]);
       }
@@ -219,7 +220,7 @@ export default function ChatWidget() {
             ...prev,
             {
               sender: 'agent',
-              text: `المواعيد المتاحة في جدول ${appt.doctor_name} خلال الشهر القادم:\nيرجى اختيار الموعد الجديد لتحديثه في السجل:`,
+              text: `المواعيد المتاحة في جدول ${appt.doctor_name} خلال الشهر القادم:\nاختر الموعد الجديد لتحديثه في السجل:`,
               options: slotOptions,
             },
           ]);
@@ -231,7 +232,7 @@ export default function ChatWidget() {
         }
       }
 
-      // 5. تأكيد تعديل الموعد القائم في قاعدة البيانات
+      // 5. تأكيد تعديل الموعد القائم
       else if (option.type === 'reschedule_confirm') {
         const { apptId, doctorName, clinicName, newIsoDate, displayDate } = option.payload;
 
@@ -249,7 +250,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: `تم تعديل موعدك وتحديثه في قاعدة البيانات بنجاح برقم مرجعي (#${orderNumber})!\n\n• الطبيب: ${doctorName}\n• العيادة: ${clinicName}\n• الموعد الجديد: ${displayDate}\n\nتم إرسال إشعار التحديث لبريدك الإلكتروني وجوالك المسجل.`,
+            text: `تم تعديل موعدك وتحديثه في قاعدة البيانات بنجاح برقم مرجعي (#${orderNumber})!\n• الطبيب: ${doctorName}\n• العيادة: ${clinicName}\n• الموعد الجديد: ${displayDate}`,
           },
         ]);
       }
@@ -272,13 +273,13 @@ export default function ChatWidget() {
         ]);
       }
 
-      // 7. إعادة صرف دواء واحد أو كل الأدوية
+      // 7. الخدمات الأخرى (الوصفات والتقارير والتحاليل)
       else if (option.type === 'refill_single') {
         setMessages((prev) => [
           ...prev,
           {
             sender: 'agent',
-            text: `تم إرسال طلب إعادة صرف الدواء (${option.payload.medication_name}) إلى الصيدلية بنجاح برقم طلب مرجعي (#${orderNumber}). يمكنك الاستلام من صيدلية المستشفى، وتم إشعارك عبر البريد والجوال.`,
+            text: `تم إرسال طلب إعادة صرف الدواء (${option.payload.medication_name}) للصيدلية بنجاح برقم مرجعي (#${orderNumber}).`,
           },
         ]);
       } else if (option.type === 'refill_all') {
@@ -287,7 +288,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: `تم إرسال طلب إعادة صرف كافة الوصفات (${names}) إلى الصيدلية بنجاح برقم طلب مرجعي (#${orderNumber}). يمكنك الاستلام من الصيدلية وتم إشعارك عبر البريد والجوال.`,
+            text: `تم إرسال طلب إعادة صرف كافة الوصفات (${names}) للصيدلية برقم مرجعي (#${orderNumber}).`,
           },
         ]);
       } else if (option.type === 'send_report') {
@@ -295,7 +296,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: `تم إصدار نسخة مصدقة من التقارير برقم طلب (#${orderNumber}) وتم إرسالها لبريدك الإلكتروني وجوالك.`,
+            text: `تم إصدار نسخة مصدقة من التقارير برقم طلب (#${orderNumber}) وإرسالها لبريدك وجوالك.`,
           },
         ]);
       } else if (option.type === 'send_labs') {
@@ -303,7 +304,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: `تم تجهيز تقرير التحاليل برقم طلب (#${orderNumber}) وإرساله لبريدك الإلكتروني ورقم جوالك المسجل.`,
+            text: `تم تجهيز تقرير التحاليل برقم طلب (#${orderNumber}) وإرساله لبريدك الإلكتروني ورقم جوالك.`,
           },
         ]);
       }
@@ -340,19 +341,20 @@ export default function ChatWidget() {
         return;
       }
 
-      // طلب حجز موعد جديد مباشرة
+      // طلب حجز موعد جديد مباشرة (جلب الأطباء من Supabase)
       if (cleanQuery.includes('حجز') || cleanQuery.includes('جديد')) {
-        const docOptions: ActionOption[] = DOCTORS_LIST.map((doc) => ({
-          label: `🩺 ${doc.name} (${doc.clinic})`,
+        const { data: doctorsList } = await supabase.from('doctors').select('*');
+        const docOptions: ActionOption[] = (doctorsList || []).map((doc: any) => ({
+          label: `🩺 ${doc.doctor_name} (${doc.clinic_name})`,
           type: 'book_slot_confirm',
-          payload: doc,
+          payload: { name: doc.doctor_name, clinic: doc.clinic_name },
         }));
 
         setMessages((prev) => [
           ...prev,
           {
             sender: 'agent',
-            text: 'اختر الطبيب أو التخصص المناسب لحجز موعد جديد:',
+            text: 'اختر الطبيب أو التخصص المناسب لحجز موعد جديد من قاعدة البيانات:',
             options: docOptions,
           },
         ]);
@@ -360,7 +362,7 @@ export default function ChatWidget() {
         return;
       }
 
-      // سيناريو المواعيدي (عرض المواعيد القائمة + خيار حجز موعد جديد دائماً)
+      // سيناريو المواعيدي
       if (
         cleanQuery.includes('موعد') ||
         cleanQuery.includes('مواعيد') ||
@@ -428,7 +430,7 @@ export default function ChatWidget() {
         return;
       }
 
-      // سيناريو الوصفات الطبية
+      // سيناريو الوصفات
       if (
         cleanQuery.includes('وصفة') ||
         cleanQuery.includes('وصفات') ||
@@ -646,7 +648,7 @@ export default function ChatWidget() {
                   )}
                 </div>
               ))}
-              {loading && <div className="text-xs text-gray-500 animate-pulse">جاري معالجة طلبك مع قاعدة البيانات...</div>}
+              {loading && <div className="text-xs text-gray-500 animate-pulse">جاري جلب البيانات من قاعدة البيانات...</div>}
             </div>
 
             {/* Input */}
