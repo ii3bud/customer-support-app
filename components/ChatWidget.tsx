@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import LoginModal from './LoginModal';
 
@@ -40,6 +40,9 @@ export default function ChatWidget() {
     },
   ]);
 
+  // مرجع لنهاية المحادثة للتمرير التلقائي السلس
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     setIsMounted(true);
 
@@ -53,6 +56,13 @@ export default function ChatWidget() {
 
     return () => authListener.subscription.unsubscribe();
   }, []);
+
+  // التمرير التلقائي لأسفل الشات عند إضافة رسالة جديدة أو تغير حالة التحميل أو فتح النافذة
+  useEffect(() => {
+    if (isOpen) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, loading, isOpen]);
 
   if (!isMounted) {
     return null;
@@ -251,7 +261,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: `تم إرسال طلب إعادة صرف الدواء (${option.payload.medication_name}) للصيدلية بنجاح برقم مرجعي (#${orderNumber}).`,
+            text: `تم إرسال طلب إعادة صرف الدواء (${option.payload.medication_name}) للصيدلية بنجاح برقم مرجعي (#${orderNumber}).\nيمكنك الاستلام من الصيدلية، كما تم إشعارك عبر البريد الإلكتروني ورقم الجوال.`,
           },
         ]);
       } else if (option.type === 'refill_all') {
@@ -260,7 +270,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: `تم إرسال طلب إعادة صرف كافة الوصفات (${names}) للصيدلية برقم مرجعي (#${orderNumber}).`,
+            text: `تم إرسال طلب إعادة صرف كافة الوصفات (${names}) للصيدلية برقم مرجعي (#${orderNumber}).\nيمكنك الاستلام من الصيدلية، كما تم إشعارك عبر البريد الإلكتروني ورقم الجوال.`,
           },
         ]);
       } else if (option.type === 'send_single_report') {
@@ -272,12 +282,12 @@ export default function ChatWidget() {
           },
         ]);
       } else if (option.type === 'send_all_reports') {
-        const types = option.payload.map((r: any) => r.report_type).join(' و ');
+        const types = option.payload.map((r: any) => r.report_type).join('، ');
         setMessages((prev) => [
           ...prev,
           {
             sender: 'agent',
-            text: `تم إصدار وإرسال كافة التقارير والإجازات (${types}) برقم مرجعي (#${orderNumber}) إلى بريدك الإلكتروني ورقم جوالك المسجل.`,
+            text: `تم إصدار وإرسال كافة التقارير والإجازات الطبية (${types}) برقم مرجعي (#${orderNumber}) إلى بريدك الإلكتروني ورقم جوالك المسجل.`,
           },
         ]);
       } else if (option.type === 'send_labs') {
@@ -322,6 +332,7 @@ export default function ChatWidget() {
         return;
       }
 
+      // 1. حجز موعد جديد
       if (
         cleanQuery.includes('حجز') ||
         cleanQuery.includes('موقع') ||
@@ -351,6 +362,7 @@ export default function ChatWidget() {
         return;
       }
 
+      // 2. المواعيد القائمة
       if (
         cleanQuery.includes('موعد') ||
         cleanQuery.includes('مواعيد') ||
@@ -387,12 +399,12 @@ export default function ChatWidget() {
 
           appts.forEach((a) => {
             options.push({
-              label: `🗓️ تعديل موعد د. ${a.doctor_name}`,
+              label: `🗓️ تعديل موعد ${a.doctor_name}`,
               type: 'reschedule_init',
               payload: a,
             });
             options.push({
-              label: `❌ إلغاء موعد د. ${a.doctor_name}`,
+              label: `❌ إلغاء موعد ${a.doctor_name}`,
               type: 'cancel_appt',
               payload: a,
             });
@@ -420,12 +432,14 @@ export default function ChatWidget() {
         return;
       }
 
+      // 3. الوصفات الطبية وإعادة الصرف
       if (
         cleanQuery.includes('وصفة') ||
         cleanQuery.includes('وصفات') ||
         cleanQuery.includes('وصفاتي') ||
         cleanQuery.includes('دواء') ||
         cleanQuery.includes('أدوية') ||
+        cleanQuery.includes('ادوية') ||
         cleanQuery.includes('علاج') ||
         cleanQuery.includes('علاجي') ||
         cleanQuery.includes('صرف') ||
@@ -473,15 +487,16 @@ export default function ChatWidget() {
         return;
       }
 
-      // التقارير والإجازات (اختيار تقرير محدد أو الكل)
+      // 4. التقارير والإجازات المرضية (اختيار تقرير محدد أو إرسال الكل)
       if (
         cleanQuery.includes('تقرير') ||
         cleanQuery.includes('تقارير') ||
         cleanQuery.includes('تقاريري') ||
         cleanQuery.includes('إجازة') ||
         cleanQuery.includes('اجازة') ||
+        cleanQuery.includes('اجازتي') ||
+        cleanQuery.includes('إجازتي') ||
         cleanQuery.includes('إجازاتي') ||
-        cleanQuery.includes('إجازتي المرضية') ||
         cleanQuery.includes('مرضية') ||
         cleanQuery.includes('المرضية') ||
         cleanQuery.includes('شهادة')
@@ -493,17 +508,15 @@ export default function ChatWidget() {
 
         if (reports && reports.length > 0) {
           const listText = reports
-            .map((r, i) => `${i + 1}. ${r.report_type} - بتاريخ ${r.issue_date} (د. ${r.doctor_name})`)
+            .map((r, i) => `${i + 1}. ${r.report_type} - بتاريخ ${r.issue_date} (${r.doctor_name})`)
             .join('\n');
 
-          // خيار لكل تقرير على حدة
           const options: ActionOption[] = reports.map((r) => ({
             label: `📩 إرسال: ${r.report_type} (${r.doctor_name})`,
             type: 'send_single_report',
             payload: r,
           }));
 
-          // إذا كان هناك أكثر من تقرير، نضيف زر إرسال الكل معاً
           if (reports.length > 1) {
             options.push({
               label: '📦 إرسال جميع التقارير والإجازات معاً (PDF)',
@@ -530,18 +543,19 @@ export default function ChatWidget() {
         return;
       }
 
+      // 5. التحاليل والأشعة
       if (
         cleanQuery.includes('تحليل') ||
         cleanQuery.includes('تحاليل') ||
+        cleanQuery.includes('تحاليلي') ||
         cleanQuery.includes('تحاليلى') ||
         cleanQuery.includes('تحاليري') ||
-        cleanQuery.includes('نتائج التحاليل') ||
+        cleanQuery.includes('نتائج') ||
         cleanQuery.includes('أشعة') ||
         cleanQuery.includes('اشعة') ||
         cleanQuery.includes('فحص') ||
         cleanQuery.includes('فحوصات') ||
-        cleanQuery.includes('نتائج') ||
-        cleanQuery.includes('تخدير')
+        cleanQuery.includes('مختبر')
       ) {
         const { data: labs } = await supabase
           .from('patient_lab_results')
@@ -571,11 +585,13 @@ export default function ChatWidget() {
         return;
       }
 
+      // 6. الملف الطبي والتأمين
       if (
         cleanQuery.includes('ملفي') ||
         cleanQuery.includes('سجلي') ||
         cleanQuery.includes('معلوماتي') ||
         cleanQuery.includes('تأمين') ||
+        cleanQuery.includes('تامين') ||
         cleanQuery.includes('تأميني')
       ) {
         const { data: profile } = await supabase
@@ -653,25 +669,33 @@ export default function ChatWidget() {
               </div>
               <div className="flex items-center gap-2">
                 {user ? (
-                  <button onClick={handleLogout} className="text-xs bg-red-500 px-2.5 py-1 rounded font-semibold">
+                  <button
+                    onClick={handleLogout}
+                    className="text-xs bg-red-500 hover:bg-red-600 px-2.5 py-1 rounded font-semibold"
+                  >
                     خروج
                   </button>
                 ) : (
                   <button
                     onClick={() => setIsLoginModalOpen(true)}
-                    className="text-xs bg-white text-emerald-800 px-2.5 py-1 rounded font-bold"
+                    className="text-xs bg-white text-emerald-800 hover:bg-gray-100 px-2.5 py-1 rounded font-bold"
                   >
                     دخول
                   </button>
                 )}
-                <button onClick={() => setIsOpen(false)} className="font-bold text-lg mr-1">✕</button>
+                <button onClick={() => setIsOpen(false)} className="font-bold text-lg mr-1">
+                  ✕
+                </button>
               </div>
             </div>
 
             {/* Messages */}
             <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-gray-50">
               {messages.map((msg, idx) => (
-                <div key={idx} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
+                <div
+                  key={idx}
+                  className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
+                >
                   <div
                     className={`p-3 rounded-2xl max-w-[88%] text-sm whitespace-pre-line leading-relaxed ${
                       msg.sender === 'user'
@@ -698,7 +722,13 @@ export default function ChatWidget() {
                   )}
                 </div>
               ))}
-              {loading && <div className="text-xs text-gray-500 animate-pulse">جاري جلب البيانات من قاعدة البيانات...</div>}
+              {loading && (
+                <div className="text-xs text-gray-500 animate-pulse">
+                  جاري جلب البيانات من قاعدة البيانات...
+                </div>
+              )}
+              {/* نقطة النهاية للتمرير التلقائي السلس */}
+              <div ref={messagesEndRef} />
             </div>
 
             {/* Input */}
