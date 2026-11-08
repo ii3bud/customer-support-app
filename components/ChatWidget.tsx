@@ -26,6 +26,18 @@ interface Message {
   options?: ActionOption[];
 }
 
+// دالة ذكية لتوحيد الحروف العربية وتسهيل الفهم والمطابقة
+const normalizeText = (text: string) => {
+  return text
+    .toLowerCase()
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/د\./g, '')
+    .replace(/دكتور/g, '')
+    .trim();
+};
+
 export default function ChatWidget() {
   const [isMounted, setIsMounted] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
@@ -36,11 +48,10 @@ export default function ChatWidget() {
   const [messages, setMessages] = useState<Message[]>([
     {
       sender: 'agent',
-      text: 'أهلاً بك في البوابة الطبية الذكية لمجموعة حبيب الطبية! يمكنك الاستفسار وتنفيذ الخدمات مباشرة مثل: "حجز موعد جديد"، "مواعيدي"، "وصفاتي الطبية"، "التقارير"، "إجازتي المرضية"، أو "نتائج التحاليل".',
+      text: 'أهلاً بك في البوابة الطبية الذكية لمجموعة د. سليمان الحبيب! تحدث معي بطبيعية، مثلاً: "أبغى إعادة صرف دواء كذا"، "احجز لي مع دكتور خالد"، أو "أرسل إجازتي المرضية".',
     },
   ]);
 
-  // مرجع لنهاية المحادثة للتمرير التلقائي السلس
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -57,7 +68,6 @@ export default function ChatWidget() {
     return () => authListener.subscription.unsubscribe();
   }, []);
 
-  // التمرير التلقائي لأسفل الشات عند إضافة رسالة جديدة أو تغير حالة التحميل أو فتح النافذة
   useEffect(() => {
     if (isOpen) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -67,6 +77,18 @@ export default function ChatWidget() {
   if (!isMounted) {
     return null;
   }
+
+  // التحقق الذكي من تطابق كلام العميل مع عنصر في قاعدة البيانات (مثل اسم الدواء أو الطبيب)
+  const isEntityMentioned = (userQuery: string, dbItemName: string) => {
+    const normQuery = normalizeText(userQuery);
+    const normItem = normalizeText(dbItemName);
+
+    if (normQuery.includes(normItem)) return true;
+
+    // فحص الكلمات المفتاحية داخل الاسم (إذا كتب جزءاً من اسم الدواء أو اسم الطبيب الأول)
+    const itemWords = normItem.split(/\s+/).filter((w) => w.length > 2);
+    return itemWords.some((word) => normQuery.includes(word));
+  };
 
   const getAvailableSlotsForDoctor = async (doctorName: string, excludeDate?: string) => {
     const { data: bookedAppts } = await supabase
@@ -313,10 +335,12 @@ export default function ChatWidget() {
     if (!input.trim() || loading) return;
 
     const userQuery = input.trim();
-    const cleanQuery = userQuery.toLowerCase();
+    const normQuery = normalizeText(userQuery);
     setInput('');
     setMessages((prev) => [...prev, { sender: 'user', text: userQuery }]);
     setLoading(true);
+
+    const orderNumber = Math.floor(10000 + Math.random() * 90000);
 
     try {
       if (!user) {
@@ -324,7 +348,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: 'لتصفح سجلك الطبي والاستفادة من الخدمات المخصصة، يرجى تسجيل الدخول أولاً.',
+            text: 'لتصفح سجلك الطبي وتنفيذ طلباتك الذكية مباشرة، يرجى تسجيل الدخول أولاً.',
           },
         ]);
         setIsLoginModalOpen(true);
@@ -332,18 +356,254 @@ export default function ChatWidget() {
         return;
       }
 
-      // 1. حجز موعد جديد
-      if (
-        cleanQuery.includes('حجز') ||
-        cleanQuery.includes('موقع') ||
-        cleanQuery.includes('موعد جديد') ||
-        cleanQuery.includes('اضافه موعد') ||
-        cleanQuery.includes('إضافة موعد') ||
-        cleanQuery.includes('ابي احجز') ||
-        cleanQuery.includes('أبي أحجز') ||
-        cleanQuery.includes('جديد')
-      ) {
-        const { data: doctorsList } = await supabase.from('doctors').select('*');
+      // =========================================================================
+      // 1. الذكاء الاصطناعي للوصفات الطبية وإعادة الصرف (يفهم اسم الدواء مباشرة!)
+      // =========================================================================
+      const { data: prescriptions } = await supabase
+        .from('patient_prescriptions')
+        .select('*')
+        .eq('patient_id', user.id);
+
+      // فحص ما إذا كان العميل قد ذكر اسم دواء مسجل في ملفه مباشرة حتى بدون كلمة "وصفة"
+      const matchedMed = (prescriptions || []).find((p) =>
+        isEntityMentioned(userQuery, p.medication_name)
+      );
+
+      const isPrescriptionIntent =
+        matchedMed ||
+        normQuery.includes('وصفه') ||
+        normQuery.includes('وصفات') ||
+        normQuery.includes('وصفاتي') ||
+        normQuery.includes('دواء') ||
+        normQuery.includes('ادويه') ||
+        normQuery.includes('ادويتي') ||
+        normQuery.includes('علاج') ||
+        normQuery.includes('علاجي') ||
+        normQuery.includes('صرف') ||
+        normQuery.includes('تجديد');
+
+      if (isPrescriptionIntent) {
+        if (prescriptions && prescriptions.length > 0) {
+          // أ) إذا ذكر العميل اسم الدواء الموجود في ملفه -> تنفيذ مباشر فوراً!
+          if (matchedMed) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                sender: 'agent',
+                text: `أبشر! تعرفت على طلبك لدواء (${matchedMed.medication_name} - ${matchedMed.dosage}) من سجلك الطبي.\n\n✅ تم اعتماد وإرسال طلب إعادة صرف الدواء إلى الصيدلية مباشرة برقم مرجعي (#${orderNumber})!\nيمكنك استلامه من صيدلية المستشفى، وتم إشعارك عبر البريد الإلكتروني ورقم الجوال.`,
+              },
+            ]);
+            setLoading(false);
+            return;
+          }
+
+          // ب) إذا طلب صرف "كل" أو "جميع" الأدوية مباشرة -> تنفيذ مباشر فوراً!
+          if (
+            (normQuery.includes('كل') || normQuery.includes('جميع')) &&
+            (normQuery.includes('صرف') || normQuery.includes('تجديد') || normQuery.includes('ابغى') || normQuery.includes('ابي'))
+          ) {
+            const names = prescriptions.map((p) => p.medication_name).join('، ');
+            setMessages((prev) => [
+              ...prev,
+              {
+                sender: 'agent',
+                text: `أبشر! تم اعتماد وإرسال طلب إعادة صرف كافة أدويتك المسجلة (${names}) إلى الصيدلية مباشرة برقم مرجعي (#${orderNumber})!`,
+              },
+            ]);
+            setLoading(false);
+            return;
+          }
+
+          // ج) إذا لم يحدد اسم الدواء أو كتب اسم دواء غير واضح -> يعرض له القائمة ليختار منها بذكاء
+          const rxList = prescriptions
+            .map((p, i) => `${i + 1}. ${p.medication_name} (${p.dosage}) - الحالة: ${p.status}`)
+            .join('\n');
+
+          const options: ActionOption[] = prescriptions.map((p) => ({
+            label: `🔄 إعادة صرف: ${p.medication_name}`,
+            type: 'refill_single',
+            payload: p,
+          }));
+
+          if (prescriptions.length > 1) {
+            options.push({
+              label: '📦 إعادة صرف جميع الوصفات الطبية معاً',
+              type: 'refill_all',
+              payload: prescriptions,
+            });
+          }
+
+          const asksForSpecificUnfoundMed =
+            normQuery.includes('صرف') && normQuery.split(' ').length > 3;
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: asksForSpecificUnfoundMed
+                ? `لم أتمكن من مطابقة اسم الدواء المذكور مع سجلك، ولكن إليك الوصفات الطبية المسجلة في ملفك:\n${rxList}\n\nيرجى اختيار الدواء الذي ترغب بإعادة صرفه:`
+                : `إليك الوصفات الطبية المسجلة في ملفك:\n${rxList}\n\nيمكنك اختيار الدواء المطلوب لإعادة الصرف (أو اكتب لي مثلاً: "أبغى صرف ${prescriptions[0].medication_name}"):`,
+              options,
+            },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { sender: 'agent', text: 'فحصت ملفك الطبي، ولا توجد وصفات طبية مسجلة حالياً.' },
+          ]);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // =========================================================================
+      // 2. الذكاء الاصطناعي للتقارير والإجازات المرضية (يميز بين الإجازة والتقرير!)
+      // =========================================================================
+      const isReportIntent =
+        normQuery.includes('تقرير') ||
+        normQuery.includes('تقارير') ||
+        normQuery.includes('اجازه') ||
+        normQuery.includes('اجازتي') ||
+        normQuery.includes('اجازاتي') ||
+        normQuery.includes('مرضيه') ||
+        normQuery.includes('شهاده');
+
+      if (isReportIntent) {
+        const { data: reports } = await supabase
+          .from('patient_medical_reports')
+          .select('*')
+          .eq('patient_id', user.id);
+
+        if (reports && reports.length > 0) {
+          // فحص إذا كان المستخدم قد حدد نوع التقرير أو اسم الدكتور في كلامه
+          const wantsSickLeaveOnly =
+            (normQuery.includes('اجازه') || normQuery.includes('مرضيه')) &&
+            !normQuery.includes('تقرير');
+          const wantsMedicalReportOnly =
+            normQuery.includes('تقرير شامل') ||
+            (normQuery.includes('تقرير طبي') && !normQuery.includes('اجازه'));
+
+          const matchedReport = reports.find(
+            (r) =>
+              (wantsSickLeaveOnly && normalizeText(r.report_type).includes('اجازه')) ||
+              (wantsMedicalReportOnly && normalizeText(r.report_type).includes('تقرير')) ||
+              isEntityMentioned(userQuery, r.doctor_name)
+          );
+
+          // إذا طلب إرسال أو تحميل تقرير محدد وتطابق مع ملفه -> إرسال فوري!
+          if (
+            matchedReport &&
+            (normQuery.includes('ارسل') ||
+              normQuery.includes('ابغى') ||
+              normQuery.includes('ابي') ||
+              normQuery.includes('عطني') ||
+              normQuery.includes('اصدار') ||
+              wantsSickLeaveOnly)
+          ) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                sender: 'agent',
+                text: `أبشر! وجدت الوثيقة المطلوبة في ملفك (${matchedReport.report_type} - بتاريخ ${matchedReport.issue_date} من ${matchedReport.doctor_name}).\n\n✅ تم إصدار نسخة مصدقة (PDF) وإرسالها فوراً إلى بريدك الإلكتروني ورقم جوالك برقم مرجعي (#${orderNumber})!\n\nوإذا كنت ترغب باستعراض بقية تقاريرك، يمكنك الضغط أدناه:`,
+                options: [
+                  {
+                    label: '📦 إرسال جميع التقارير والإجازات الأخرى معاً',
+                    type: 'send_all_reports',
+                    payload: reports,
+                  },
+                ],
+              },
+            ]);
+            setLoading(false);
+            return;
+          }
+
+          // عرض الخيارات إذا كان السؤال عاماً (مثل: "التقارير")
+          const listText = reports
+            .map((r, i) => `${i + 1}. ${r.report_type} - بتاريخ ${r.issue_date} (${r.doctor_name})`)
+            .join('\n');
+
+          const options: ActionOption[] = reports.map((r) => ({
+            label: `📩 إرسال: ${r.report_type} (${r.doctor_name})`,
+            type: 'send_single_report',
+            payload: r,
+          }));
+
+          if (reports.length > 1) {
+            options.push({
+              label: '📦 إرسال جميع التقارير والإجازات معاً (PDF)',
+              type: 'send_all_reports',
+              payload: reports,
+            });
+          }
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: `تم العثور على التقارير والإجازات الطبية التالية في ملفك:\n${listText}\n\nيرجى اختيار التقرير المطلوب إرساله:`,
+              options,
+            },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { sender: 'agent', text: 'لا توجد تقارير أو إجازات مرضية مسجلة في ملفك حالياً.' },
+          ]);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // =========================================================================
+      // 3. الذكاء الاصطناعي للمواعيد والحجز المباشر باسم الطبيب أو التخصص
+      // =========================================================================
+      const { data: doctorsList } = await supabase.from('doctors').select('*');
+      const matchedDoctorForBooking = (doctorsList || []).find(
+        (doc: any) =>
+          isEntityMentioned(userQuery, doc.doctor_name) ||
+          isEntityMentioned(userQuery, doc.clinic_name)
+      );
+
+      const isCancelIntent = normQuery.includes('الغاء') || normQuery.includes('الغي') || normQuery.includes('كنسل');
+      const isRescheduleIntent = normQuery.includes('تعديل') || normQuery.includes('عدل') || normQuery.includes('تغيير') || normQuery.includes('تاجيل');
+      const isBookingIntent =
+        normQuery.includes('حجز') ||
+        normQuery.includes('احجز') ||
+        normQuery.includes('جديد') ||
+        (matchedDoctorForBooking && !isCancelIntent && !isRescheduleIntent);
+
+      // أ) إذا طلب حجز موعد وذكر اسم الدكتور أو العيادة في نفس الجملة -> يفتح له جدول الدكتور فوراً!
+      if (isBookingIntent && matchedDoctorForBooking) {
+        const availableSlots = await getAvailableSlotsForDoctor(matchedDoctorForBooking.doctor_name);
+        if (availableSlots.length > 0) {
+          const slotOptions: ActionOption[] = availableSlots.map((slot) => ({
+            label: `📅 تأكيد حجز: ${slot.displayDate}`,
+            type: 'book_slot_confirm',
+            payload: {
+              doctorName: matchedDoctorForBooking.doctor_name,
+              clinicName: matchedDoctorForBooking.clinic_name,
+              newIsoDate: slot.isoDate,
+              displayDate: slot.displayDate,
+              isNewBooking: true,
+            },
+          }));
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              sender: 'agent',
+              text: `أبشر! إليك المواعيد المتاحة مباشرة مع ${matchedDoctorForBooking.doctor_name} (${matchedDoctorForBooking.clinic_name}) خلال الشهر القادم:\nاختر اليوم المناسب لإتمام الحجز فوراً:`,
+              options: slotOptions,
+            },
+          ]);
+          setLoading(false);
+          return;
+        }
+      }
+
+      // ب) إذا طلب حجز موعد جديد بشكل عام بدون تحديد طبيب
+      if (isBookingIntent && !normQuery.includes('مواعيدي')) {
         const docOptions: ActionOption[] = (doctorsList || []).map((doc: any) => ({
           label: `🩺 ${doc.doctor_name} (${doc.clinic_name})`,
           type: 'book_slot_confirm',
@@ -354,7 +614,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: 'اختر الطبيب أو التخصص المناسب لحجز موعد جديد من قاعدة البيانات:',
+            text: 'اختر الطبيب أو التخصص المناسب لحجز موعد جديد (أو اكتب اسم الطبيب مباشرة):',
             options: docOptions,
           },
         ]);
@@ -362,20 +622,80 @@ export default function ChatWidget() {
         return;
       }
 
-      // 2. المواعيد القائمة
+      // ج) إدارة المواعيد القائمة (عرض، أو إلغاء مباشر، أو تعديل مباشر)
       if (
-        cleanQuery.includes('موعد') ||
-        cleanQuery.includes('مواعيد') ||
-        cleanQuery.includes('مواعيدي') ||
-        cleanQuery.includes('جدول') ||
-        cleanQuery.includes('زيارة') ||
-        cleanQuery.includes('حجوزاتي')
+        normQuery.includes('موعد') ||
+        normQuery.includes('مواعيد') ||
+        normQuery.includes('جدول') ||
+        normQuery.includes('زياره') ||
+        isCancelIntent ||
+        isRescheduleIntent
       ) {
         const { data: appts } = await supabase
           .from('patient_appointments')
           .select('*')
           .eq('patient_id', user.id)
           .eq('status', 'مؤكد');
+
+        // إذا كتب "ألغِ موعد دكتور خالد" أو كان لديه موعد واحد وطلب إلغاءه مباشرة!
+        if (isCancelIntent && appts && appts.length > 0) {
+          const targetAppt =
+            appts.find((a) => isEntityMentioned(userQuery, a.doctor_name)) ||
+            (appts.length === 1 ? appts[0] : null);
+
+          if (targetAppt) {
+            await supabase
+              .from('patient_appointments')
+              .update({ status: 'ملغي' })
+              .eq('id', targetAppt.id);
+
+            setMessages((prev) => [
+              ...prev,
+              {
+                sender: 'agent',
+                text: `تم تنفيذ طلبك فوراً! ألغينا موعدك مع ${targetAppt.doctor_name} (${targetAppt.clinic_name}) في قاعدة البيانات برقم مرجعي (#${orderNumber}).`,
+              },
+            ]);
+            setLoading(false);
+            return;
+          }
+        }
+
+        // إذا كتب "عدّل موعد دكتور خالد" أو كان لديه موعد واحد وطلب تعديله مباشرة!
+        if (isRescheduleIntent && appts && appts.length > 0) {
+          const targetAppt =
+            appts.find((a) => isEntityMentioned(userQuery, a.doctor_name)) ||
+            (appts.length === 1 ? appts[0] : null);
+
+          if (targetAppt) {
+            const availableSlots = await getAvailableSlotsForDoctor(
+              targetAppt.doctor_name,
+              targetAppt.appointment_date
+            );
+            const slotOptions: ActionOption[] = availableSlots.map((slot) => ({
+              label: `📅 حجز البديل: ${slot.displayDate}`,
+              type: 'reschedule_confirm',
+              payload: {
+                apptId: targetAppt.id,
+                doctorName: targetAppt.doctor_name,
+                clinicName: targetAppt.clinic_name,
+                newIsoDate: slot.isoDate,
+                displayDate: slot.displayDate,
+              },
+            }));
+
+            setMessages((prev) => [
+              ...prev,
+              {
+                sender: 'agent',
+                text: `أبشر! لتعديل موعدك مع ${targetAppt.doctor_name}، إليك الأوقات المتاحة في جدوله خلال الشهر القادم:`,
+                options: slotOptions,
+              },
+            ]);
+            setLoading(false);
+            return;
+          }
+        }
 
         const options: ActionOption[] = [
           {
@@ -432,130 +752,17 @@ export default function ChatWidget() {
         return;
       }
 
-      // 3. الوصفات الطبية وإعادة الصرف
+      // =========================================================================
+      // 4. التحاليل والأشعة
+      // =========================================================================
       if (
-        cleanQuery.includes('وصفة') ||
-        cleanQuery.includes('وصفات') ||
-        cleanQuery.includes('وصفاتي') ||
-        cleanQuery.includes('دواء') ||
-        cleanQuery.includes('أدوية') ||
-        cleanQuery.includes('ادوية') ||
-        cleanQuery.includes('علاج') ||
-        cleanQuery.includes('علاجي') ||
-        cleanQuery.includes('صرف') ||
-        cleanQuery.includes('تجديد')
-      ) {
-        const { data: prescriptions } = await supabase
-          .from('patient_prescriptions')
-          .select('*')
-          .eq('patient_id', user.id);
-
-        if (prescriptions && prescriptions.length > 0) {
-          const rxList = prescriptions
-            .map((p, i) => `${i + 1}. ${p.medication_name} (${p.dosage}) - الحالة: ${p.status}`)
-            .join('\n');
-
-          const options: ActionOption[] = prescriptions.map((p) => ({
-            label: `🔄 إعادة صرف: ${p.medication_name}`,
-            type: 'refill_single',
-            payload: p,
-          }));
-
-          if (prescriptions.length > 1) {
-            options.push({
-              label: '📦 إعادة صرف جميع الوصفات الطبية معاً',
-              type: 'refill_all',
-              payload: prescriptions,
-            });
-          }
-
-          setMessages((prev) => [
-            ...prev,
-            {
-              sender: 'agent',
-              text: `إليك الوصفات الطبية في ملفك:\n${rxList}\n\nاختر الدواء المطلوب لإعادة الصرف:`,
-              options,
-            },
-          ]);
-        } else {
-          setMessages((prev) => [
-            ...prev,
-            { sender: 'agent', text: 'لا توجد وصفات طبية مسجلة حالياً.' },
-          ]);
-        }
-        setLoading(false);
-        return;
-      }
-
-      // 4. التقارير والإجازات المرضية (اختيار تقرير محدد أو إرسال الكل)
-      if (
-        cleanQuery.includes('تقرير') ||
-        cleanQuery.includes('تقارير') ||
-        cleanQuery.includes('تقاريري') ||
-        cleanQuery.includes('إجازة') ||
-        cleanQuery.includes('اجازة') ||
-        cleanQuery.includes('اجازتي') ||
-        cleanQuery.includes('إجازتي') ||
-        cleanQuery.includes('إجازاتي') ||
-        cleanQuery.includes('مرضية') ||
-        cleanQuery.includes('المرضية') ||
-        cleanQuery.includes('شهادة')
-      ) {
-        const { data: reports } = await supabase
-          .from('patient_medical_reports')
-          .select('*')
-          .eq('patient_id', user.id);
-
-        if (reports && reports.length > 0) {
-          const listText = reports
-            .map((r, i) => `${i + 1}. ${r.report_type} - بتاريخ ${r.issue_date} (${r.doctor_name})`)
-            .join('\n');
-
-          const options: ActionOption[] = reports.map((r) => ({
-            label: `📩 إرسال: ${r.report_type} (${r.doctor_name})`,
-            type: 'send_single_report',
-            payload: r,
-          }));
-
-          if (reports.length > 1) {
-            options.push({
-              label: '📦 إرسال جميع التقارير والإجازات معاً (PDF)',
-              type: 'send_all_reports',
-              payload: reports,
-            });
-          }
-
-          setMessages((prev) => [
-            ...prev,
-            {
-              sender: 'agent',
-              text: `تم العثور على التقارير والإجازات الطبية التالية في ملفك:\n${listText}\n\nيرجى اختيار التقرير المطلوب إرساله:`,
-              options,
-            },
-          ]);
-        } else {
-          setMessages((prev) => [
-            ...prev,
-            { sender: 'agent', text: 'لا توجد تقارير أو إجازات مرضية مسجلة في ملفك حالياً.' },
-          ]);
-        }
-        setLoading(false);
-        return;
-      }
-
-      // 5. التحاليل والأشعة
-      if (
-        cleanQuery.includes('تحليل') ||
-        cleanQuery.includes('تحاليل') ||
-        cleanQuery.includes('تحاليلي') ||
-        cleanQuery.includes('تحاليلى') ||
-        cleanQuery.includes('تحاليري') ||
-        cleanQuery.includes('نتائج') ||
-        cleanQuery.includes('أشعة') ||
-        cleanQuery.includes('اشعة') ||
-        cleanQuery.includes('فحص') ||
-        cleanQuery.includes('فحوصات') ||
-        cleanQuery.includes('مختبر')
+        normQuery.includes('تحليل') ||
+        normQuery.includes('تحاليل') ||
+        normQuery.includes('نتائج') ||
+        normQuery.includes('اشعه') ||
+        normQuery.includes('فحص') ||
+        normQuery.includes('فحوصات') ||
+        normQuery.includes('مختبر')
       ) {
         const { data: labs } = await supabase
           .from('patient_lab_results')
@@ -585,14 +792,15 @@ export default function ChatWidget() {
         return;
       }
 
-      // 6. الملف الطبي والتأمين
+      // =========================================================================
+      // 5. الملف الطبي والتأمين والترحيب الذكي
+      // =========================================================================
       if (
-        cleanQuery.includes('ملفي') ||
-        cleanQuery.includes('سجلي') ||
-        cleanQuery.includes('معلوماتي') ||
-        cleanQuery.includes('تأمين') ||
-        cleanQuery.includes('تامين') ||
-        cleanQuery.includes('تأميني')
+        normQuery.includes('ملفي') ||
+        normQuery.includes('سجلي') ||
+        normQuery.includes('معلوماتي') ||
+        normQuery.includes('تامين') ||
+        normQuery.includes('بياناتي')
       ) {
         const { data: profile } = await supabase
           .from('patient_profiles')
@@ -611,11 +819,36 @@ export default function ChatWidget() {
         return;
       }
 
+      if (
+        normQuery.includes('سلام') ||
+        normQuery.includes('هلا') ||
+        normQuery.includes('مرحبا') ||
+        normQuery.includes('صباح') ||
+        normQuery.includes('مساء') ||
+        normQuery.includes('كيف حالك')
+      ) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            sender: 'agent',
+            text: 'يا هلا ومرحبا بك! أنا مساعدك الذكي في مجموعة د. سليمان الحبيب الطبية. آمرني، كيف أقدر أخدمك اليوم؟ تقدر تطلب مني مباشرة مثلاً: "أبغى صرف دواء كذا"، "عدّل موعدي"، أو "أرسل إجازتي المرضية".',
+          },
+        ]);
+        setLoading(false);
+        return;
+      }
+
+      // =========================================================================
+      // 6. الرد الذكي الشامل في حال كتابة سؤال غير معروف (يعرض أزرار كل الخدمات!)
+      // =========================================================================
       setMessages((prev) => [
         ...prev,
         {
           sender: 'agent',
-          text: 'عذراً، لم أفهم طلبك بدقة. يمكنك الاستفسار عن: "حجز موعد جديد"، "مواعيدي"، "وصفاتي الطبية"، "التقارير"، "إجازتي المرضية"، أو "نتائج التحاليل".',
+          text: 'لم أفهم طلبك بالتحديد، ولكن يمكنني تنفيذ أي من خدماتك الطبية فوراً! اختر الخدمة أو اكتب طلبك بطبيعية (مثلاً: "أبغى إعادة صرف دواء كذا" أو "احجز لي مع دكتور خالد"):',
+          options: [
+            { label: '➕ حجز موعد جديد مع طبيب', type: 'book_select_doctor' },
+          ],
         },
       ]);
     } catch (err: any) {
@@ -642,7 +875,7 @@ export default function ChatWidget() {
           setUser(loggedUser);
           setMessages((prev) => [
             ...prev,
-            { sender: 'agent', text: 'تم تسجيل الدخول بنجاح! يمكنك الآن الاستفادة من كافة الخدمات الطبية.' },
+            { sender: 'agent', text: 'تم تسجيل الدخول بنجاح! تحدث معي بطبيعية وأنا أنفذ طلبك فوراً.' },
           ]);
         }}
       />
@@ -724,10 +957,9 @@ export default function ChatWidget() {
               ))}
               {loading && (
                 <div className="text-xs text-gray-500 animate-pulse">
-                  جاري جلب البيانات من قاعدة البيانات...
+                  جاري تحليل طلبك ومطابقته مع قاعدة البيانات...
                 </div>
               )}
-              {/* نقطة النهاية للتمرير التلقائي السلس */}
               <div ref={messagesEndRef} />
             </div>
 
@@ -738,7 +970,7 @@ export default function ChatWidget() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="اكتب طلبك (مثال: التقارير)..."
+                placeholder="اكتب طلبك بطبيعية (مثال: اصرف لي دواء...)"
                 className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-600"
               />
               <button
