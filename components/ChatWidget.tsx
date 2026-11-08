@@ -45,14 +45,16 @@ export default function ChatWidget() {
   const [loading, setLoading] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [isListening, setIsListening] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
       sender: 'agent',
-      text: 'أهلاً بك في البوابة الطبية الذكية لمجموعة د. سليمان الحبيب! تحدث معي بطبيعية، مثلاً: "أبغى إعادة صرف دواء كذا"، "احجز لي مع دكتور خالد"، أو "أرسل إجازتي المرضية".',
+      text: 'أهلاً بك في البوابة الطبية الذكية لمجموعة د. سليمان الحبيب! تحدث معي كتابةً أو بالصوت عبر زر المايك 🎙️، مثلاً: "أبغى إعادة صرف دواء كذا"، "احجز لي مع دكتور خالد"، أو "أرسل إجازتي المرضية".',
     },
   ]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     setIsMounted(true);
@@ -64,6 +66,41 @@ export default function ChatWidget() {
     const { data: authListener } = supabase.auth.onAuthStateChange((_, session) => {
       setUser(session?.user ?? null);
     });
+
+    // إعداد محرك التعرف على الصوت (Web Speech API) باللغة العربية
+    if (typeof window !== 'undefined') {
+      const SpeechRecognition =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'ar-SA';
+        recognition.continuous = false; // يتوقف تلقائياً بمجرد انتهاء المستخدم من جملته
+        recognition.interimResults = true; // يعرض الكلام لحظياً أثناء التحدث
+
+        recognition.onstart = () => {
+          setIsListening(true);
+        };
+
+        recognition.onresult = (event: any) => {
+          let transcript = '';
+          for (let i = 0; i < event.results.length; i++) {
+            transcript += event.results[i][0].transcript;
+          }
+          setInput(transcript);
+        };
+
+        recognition.onerror = () => {
+          setIsListening(false);
+        };
+
+        recognition.onend = () => {
+          setIsListening(false);
+        };
+
+        recognitionRef.current = recognition;
+      }
+    }
 
     return () => authListener.subscription.unsubscribe();
   }, []);
@@ -78,14 +115,32 @@ export default function ChatWidget() {
     return null;
   }
 
-  // التحقق الذكي من تطابق كلام العميل مع عنصر في قاعدة البيانات (مثل اسم الدواء أو الطبيب)
+  // تشغيل أو إيقاف التسجيل الصوتي
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      alert('متصفحك الحالي لا يدعم ميزة الإملاء الصوتي. يرجى استخدام متصفح Google Chrome أو Edge.');
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+    } else {
+      try {
+        recognitionRef.current.start();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  };
+
+  // التحقق الذكي من تطابق كلام العميل مع عنصر في قاعدة البيانات
   const isEntityMentioned = (userQuery: string, dbItemName: string) => {
     const normQuery = normalizeText(userQuery);
     const normItem = normalizeText(dbItemName);
 
     if (normQuery.includes(normItem)) return true;
 
-    // فحص الكلمات المفتاحية داخل الاسم (إذا كتب جزءاً من اسم الدواء أو اسم الطبيب الأول)
     const itemWords = normItem.split(/\s+/).filter((w) => w.length > 2);
     return itemWords.some((word) => normQuery.includes(word));
   };
@@ -334,6 +389,12 @@ export default function ChatWidget() {
   const handleSend = async () => {
     if (!input.trim() || loading) return;
 
+    // إيقاف المايك إذا كان يعمل عند الضغط على إرسال
+    if (isListening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+    }
+
     const userQuery = input.trim();
     const normQuery = normalizeText(userQuery);
     setInput('');
@@ -356,15 +417,12 @@ export default function ChatWidget() {
         return;
       }
 
-      // =========================================================================
-      // 1. الذكاء الاصطناعي للوصفات الطبية وإعادة الصرف (يفهم اسم الدواء مباشرة!)
-      // =========================================================================
+      // 1. الذكاء الاصطناعي للوصفات الطبية وإعادة الصرف
       const { data: prescriptions } = await supabase
         .from('patient_prescriptions')
         .select('*')
         .eq('patient_id', user.id);
 
-      // فحص ما إذا كان العميل قد ذكر اسم دواء مسجل في ملفه مباشرة حتى بدون كلمة "وصفة"
       const matchedMed = (prescriptions || []).find((p) =>
         isEntityMentioned(userQuery, p.medication_name)
       );
@@ -384,7 +442,6 @@ export default function ChatWidget() {
 
       if (isPrescriptionIntent) {
         if (prescriptions && prescriptions.length > 0) {
-          // أ) إذا ذكر العميل اسم الدواء الموجود في ملفه -> تنفيذ مباشر فوراً!
           if (matchedMed) {
             setMessages((prev) => [
               ...prev,
@@ -397,7 +454,6 @@ export default function ChatWidget() {
             return;
           }
 
-          // ب) إذا طلب صرف "كل" أو "جميع" الأدوية مباشرة -> تنفيذ مباشر فوراً!
           if (
             (normQuery.includes('كل') || normQuery.includes('جميع')) &&
             (normQuery.includes('صرف') || normQuery.includes('تجديد') || normQuery.includes('ابغى') || normQuery.includes('ابي'))
@@ -414,7 +470,6 @@ export default function ChatWidget() {
             return;
           }
 
-          // ج) إذا لم يحدد اسم الدواء أو كتب اسم دواء غير واضح -> يعرض له القائمة ليختار منها بذكاء
           const rxList = prescriptions
             .map((p, i) => `${i + 1}. ${p.medication_name} (${p.dosage}) - الحالة: ${p.status}`)
             .join('\n');
@@ -442,7 +497,7 @@ export default function ChatWidget() {
               sender: 'agent',
               text: asksForSpecificUnfoundMed
                 ? `لم أتمكن من مطابقة اسم الدواء المذكور مع سجلك، ولكن إليك الوصفات الطبية المسجلة في ملفك:\n${rxList}\n\nيرجى اختيار الدواء الذي ترغب بإعادة صرفه:`
-                : `إليك الوصفات الطبية المسجلة في ملفك:\n${rxList}\n\nيمكنك اختيار الدواء المطلوب لإعادة الصرف (أو اكتب لي مثلاً: "أبغى صرف ${prescriptions[0].medication_name}"):`,
+                : `إليك الوصفات الطبية المسجلة في ملفك:\n${rxList}\n\nيمكنك اختيار الدواء المطلوب لإعادة الصرف (أو قول لي بالمايك مثلاً: "أبغى صرف ${prescriptions[0].medication_name}"):`,
               options,
             },
           ]);
@@ -456,9 +511,7 @@ export default function ChatWidget() {
         return;
       }
 
-      // =========================================================================
-      // 2. الذكاء الاصطناعي للتقارير والإجازات المرضية (يميز بين الإجازة والتقرير!)
-      // =========================================================================
+      // 2. الذكاء الاصطناعي للتقارير والإجازات المرضية
       const isReportIntent =
         normQuery.includes('تقرير') ||
         normQuery.includes('تقارير') ||
@@ -475,7 +528,6 @@ export default function ChatWidget() {
           .eq('patient_id', user.id);
 
         if (reports && reports.length > 0) {
-          // فحص إذا كان المستخدم قد حدد نوع التقرير أو اسم الدكتور في كلامه
           const wantsSickLeaveOnly =
             (normQuery.includes('اجازه') || normQuery.includes('مرضيه')) &&
             !normQuery.includes('تقرير');
@@ -490,7 +542,6 @@ export default function ChatWidget() {
               isEntityMentioned(userQuery, r.doctor_name)
           );
 
-          // إذا طلب إرسال أو تحميل تقرير محدد وتطابق مع ملفه -> إرسال فوري!
           if (
             matchedReport &&
             (normQuery.includes('ارسل') ||
@@ -518,7 +569,6 @@ export default function ChatWidget() {
             return;
           }
 
-          // عرض الخيارات إذا كان السؤال عاماً (مثل: "التقارير")
           const listText = reports
             .map((r, i) => `${i + 1}. ${r.report_type} - بتاريخ ${r.issue_date} (${r.doctor_name})`)
             .join('\n');
@@ -555,9 +605,7 @@ export default function ChatWidget() {
         return;
       }
 
-      // =========================================================================
       // 3. الذكاء الاصطناعي للمواعيد والحجز المباشر باسم الطبيب أو التخصص
-      // =========================================================================
       const { data: doctorsList } = await supabase.from('doctors').select('*');
       const matchedDoctorForBooking = (doctorsList || []).find(
         (doc: any) =>
@@ -573,7 +621,6 @@ export default function ChatWidget() {
         normQuery.includes('جديد') ||
         (matchedDoctorForBooking && !isCancelIntent && !isRescheduleIntent);
 
-      // أ) إذا طلب حجز موعد وذكر اسم الدكتور أو العيادة في نفس الجملة -> يفتح له جدول الدكتور فوراً!
       if (isBookingIntent && matchedDoctorForBooking) {
         const availableSlots = await getAvailableSlotsForDoctor(matchedDoctorForBooking.doctor_name);
         if (availableSlots.length > 0) {
@@ -602,7 +649,6 @@ export default function ChatWidget() {
         }
       }
 
-      // ب) إذا طلب حجز موعد جديد بشكل عام بدون تحديد طبيب
       if (isBookingIntent && !normQuery.includes('مواعيدي')) {
         const docOptions: ActionOption[] = (doctorsList || []).map((doc: any) => ({
           label: `🩺 ${doc.doctor_name} (${doc.clinic_name})`,
@@ -614,7 +660,7 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: 'اختر الطبيب أو التخصص المناسب لحجز موعد جديد (أو اكتب اسم الطبيب مباشرة):',
+            text: 'اختر الطبيب أو التخصص المناسب لحجز موعد جديد (أو اذكر اسم الطبيب بالصوت أو الكتابة مباشرة):',
             options: docOptions,
           },
         ]);
@@ -622,7 +668,6 @@ export default function ChatWidget() {
         return;
       }
 
-      // ج) إدارة المواعيد القائمة (عرض، أو إلغاء مباشر، أو تعديل مباشر)
       if (
         normQuery.includes('موعد') ||
         normQuery.includes('مواعيد') ||
@@ -637,7 +682,6 @@ export default function ChatWidget() {
           .eq('patient_id', user.id)
           .eq('status', 'مؤكد');
 
-        // إذا كتب "ألغِ موعد دكتور خالد" أو كان لديه موعد واحد وطلب إلغاءه مباشرة!
         if (isCancelIntent && appts && appts.length > 0) {
           const targetAppt =
             appts.find((a) => isEntityMentioned(userQuery, a.doctor_name)) ||
@@ -661,7 +705,6 @@ export default function ChatWidget() {
           }
         }
 
-        // إذا كتب "عدّل موعد دكتور خالد" أو كان لديه موعد واحد وطلب تعديله مباشرة!
         if (isRescheduleIntent && appts && appts.length > 0) {
           const targetAppt =
             appts.find((a) => isEntityMentioned(userQuery, a.doctor_name)) ||
@@ -752,9 +795,7 @@ export default function ChatWidget() {
         return;
       }
 
-      // =========================================================================
       // 4. التحاليل والأشعة
-      // =========================================================================
       if (
         normQuery.includes('تحليل') ||
         normQuery.includes('تحاليل') ||
@@ -792,9 +833,7 @@ export default function ChatWidget() {
         return;
       }
 
-      // =========================================================================
       // 5. الملف الطبي والتأمين والترحيب الذكي
-      // =========================================================================
       if (
         normQuery.includes('ملفي') ||
         normQuery.includes('سجلي') ||
@@ -831,21 +870,19 @@ export default function ChatWidget() {
           ...prev,
           {
             sender: 'agent',
-            text: 'يا هلا ومرحبا بك! أنا مساعدك الذكي في مجموعة د. سليمان الحبيب الطبية. آمرني، كيف أقدر أخدمك اليوم؟ تقدر تطلب مني مباشرة مثلاً: "أبغى صرف دواء كذا"، "عدّل موعدي"، أو "أرسل إجازتي المرضية".',
+            text: 'يا هلا ومرحبا بك! أنا مساعدك الذكي في مجموعة د. سليمان الحبيب الطبية. آمرني، كيف أقدر أخدمك اليوم؟ تقدر تضغط زر المايك 🎙️ وتطلب مني مباشرة مثلاً: "أبغى صرف دواء كذا" أو "احجز لي موعد عند دكتور خالد".',
           },
         ]);
         setLoading(false);
         return;
       }
 
-      // =========================================================================
-      // 6. الرد الذكي الشامل في حال كتابة سؤال غير معروف (يعرض أزرار كل الخدمات!)
-      // =========================================================================
+      // 6. الرد الذكي الشامل
       setMessages((prev) => [
         ...prev,
         {
           sender: 'agent',
-          text: 'لم أفهم طلبك بالتحديد، ولكن يمكنني تنفيذ أي من خدماتك الطبية فوراً! اختر الخدمة أو اكتب طلبك بطبيعية (مثلاً: "أبغى إعادة صرف دواء كذا" أو "احجز لي مع دكتور خالد"):',
+          text: 'لم أفهم طلبك بالتحديد، ولكن يمكنني تنفيذ أي من خدماتك الطبية فوراً! اختر الخدمة أو اضغط المايك 🎙️ وتحدث بطبيعية:',
           options: [
             { label: '➕ حجز موعد جديد مع طبيب', type: 'book_select_doctor' },
           ],
@@ -875,7 +912,7 @@ export default function ChatWidget() {
           setUser(loggedUser);
           setMessages((prev) => [
             ...prev,
-            { sender: 'agent', text: 'تم تسجيل الدخول بنجاح! تحدث معي بطبيعية وأنا أنفذ طلبك فوراً.' },
+            { sender: 'agent', text: 'تم تسجيل الدخول بنجاح! تحدث معي بالصوت 🎙️ أو الكتابة وأنا أنفذ طلبك فوراً.' },
           ]);
         }}
       />
@@ -963,16 +1000,34 @@ export default function ChatWidget() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Input */}
-            <div className="p-3 border-t border-gray-200 bg-white flex gap-2">
+            {/* Input & Voice Button */}
+            <div className="p-3 border-t border-gray-200 bg-white flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={toggleListening}
+                title={isListening ? 'إيقاف التسجيل' : 'تحدث بالصوت'}
+                className={`p-2.5 rounded-xl border transition-all flex items-center justify-center ${
+                  isListening
+                    ? 'bg-red-500 text-white border-red-600 animate-pulse shadow-md'
+                    : 'bg-gray-100 hover:bg-emerald-50 text-gray-700 hover:text-emerald-700 border-gray-300'
+                }`}
+              >
+                🎙️
+              </button>
+
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="اكتب طلبك بطبيعية (مثال: اصرف لي دواء...)"
-                className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-600"
+                placeholder={isListening ? '🎙️ تفضل بالتحدث الآن...' : 'اكتب أو اضغط المايك للتحدث...'}
+                className={`flex-1 border rounded-xl px-3 py-2 text-sm focus:outline-none transition-colors ${
+                  isListening
+                    ? 'border-red-400 bg-red-50/30 placeholder-red-500'
+                    : 'border-gray-300 focus:border-emerald-600'
+                }`}
               />
+
               <button
                 onClick={handleSend}
                 disabled={loading}
